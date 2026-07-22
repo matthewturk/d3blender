@@ -187,6 +187,37 @@ selector-syntax limitation, not a path-walker one; `.filter(lambda el:
 adapter.get_attr(el, (...)) > x)` is the answer there, and it isn't
 worth solving by inventing string escaping.
 
+## `examples/geometry_nodes_countries.py` -- real third-party libraries, verify before trusting
+
+This example treats `databpy` (object/collection creation, attribute
+storage) and `nodebpy` (building Geometry Nodes trees from Python) as
+peer, top-level libraries d3blender composes with -- neither is a
+dependency of d3blender itself, and d3blender doesn't wrap either of
+them; it just selects/mutates whatever real `bpy` objects they produce
+(same "object creation is left to the caller" boundary as `mock.spawn()`
+and the collection/tick-mesh exceptions to it, see above).
+
+If you're asked to extend this example or add another one like it:
+**don't trust remembered API shapes for these two libraries -- verify
+against their actual source first.** Both are real (same author, Brady
+Johnston), both are under active, versioned development, and a
+doc-summary tool got one thing outright wrong during research for this
+file (`BlenderObject.obj` doesn't exist; the real attribute is
+`.object`) -- caught only by cloning the repos and reading source
+directly instead of trusting a fetched summary. `nodebpy` specifically
+versions its node-class definitions **per Blender release** (its latest
+tag at the time this was written, `v520.8.0`, targets Blender 5.2.x
+specifically, with no 5.3-targeted release yet) -- a node's socket names
+or defaults can change between Blender versions, so pin/verify the
+`nodebpy` version against whatever Blender version is actually running
+before assuming a node signature still matches what's used here.
+
+This example has no pytest coverage and can't get any -- it needs a
+real Blender plus both packages installed, same category as
+`scatter_plot_3d_blender.py`. It's written against verified, current,
+real APIs, not guessed ones, but that's still not the same claim as
+"run and confirmed working."
+
 ## Things that are genuinely custom (no library does this)
 
 - The axis/combinator split and the numeric-attribute/pseudo-class
@@ -242,7 +273,7 @@ worth solving by inventing string escaping.
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
 pytest                          # full suite, ~53 tests
-python examples/bar_chart.py    # and the other 5 in examples/ (one needs Blender)
+python examples/bar_chart.py    # and the other 6 in examples/ (two need Blender)
 ```
 
 ## If asked to extend this

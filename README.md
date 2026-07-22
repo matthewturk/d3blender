@@ -268,6 +268,30 @@ select(adapter, 'mesh:selected').attr('hp', 100)
 useful information. Please open an issue with the version number and
 what broke.
 
+### Working with other Blender-scripting libraries
+
+`d3blender` doesn't create objects or build node trees itself by design
+(see "Things that are genuinely custom" -- object/geometry creation is
+left to you). It composes fine with libraries that do:
+[`databpy`](https://github.com/BradyAJohnston/databpy) for creating
+objects/collections and storing per-point attributes, and
+[`nodebpy`](https://github.com/BradyAJohnston/nodebpy) for building
+Geometry Nodes trees from Python instead of the node editor. Neither
+needs to know `d3blender` exists -- `d3blender` just selects/queries/
+mutates whatever real `bpy` objects they produce, including their
+Geometry Nodes modifier inputs (see "Modifiers and Geometry Nodes
+inputs" above). `examples/geometry_nodes_countries.py` is a full,
+three-library example: nodebpy builds a shared Geometry Nodes tree,
+databpy creates one small object per country, d3blender selects the
+populous countries and changes their Geometry Nodes inputs.
+
+**Version caveat:** `nodebpy` versions its node-class definitions per
+Blender release (e.g. `v520.8.0` targets Blender 5.2.x specifically) --
+check its [releases page](https://github.com/BradyAJohnston/nodebpy/releases)
+for a tag matching your actual Blender version before relying on it;
+using a mismatched version risks a node's socket names/defaults having
+quietly changed underneath you.
+
 ### Live vs. cached
 
 `get_adapter()` snapshots `bpy.data.objects`/`.collections` at call time
