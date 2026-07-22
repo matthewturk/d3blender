@@ -71,6 +71,36 @@ These are demo scaffolding only, not selector-engine code -- there's no
 real-Blender equivalent, since object creation there goes through
 `bpy.ops`/`bpy.data.objects.new()`.
 
+## `array.py` and `get_or_create_collection()` -- how far d3 parity goes
+
+These exist to make d3.js-style "bin the data, size a bar per bucket"
+code (the classic Observable histogram notebook) portable to
+`d3blender`, without pulling in things a 3D scene doesn't have an
+opinion about yet:
+
+- `array.py` mirrors `d3.bin()`/`d3.max()`/`d3.min()`/`d3.extent()` --
+  pure data transforms, no `bpy` involved, so they're cheap and safe to
+  add. `bin()` deliberately uses fixed-width bins instead of d3's "nice"
+  auto-rounded edges -- good enough for sizing bars, not for axis ticks
+  that need to land on round numbers. Not flattened into the top-level
+  package like `scale.py` is: `max`/`min`/`bin` shadow builtins, so it's
+  `from d3blender import array; array.max(...)`.
+- `SceneAdapter.get_or_create_collection(name, parent=None)` is the
+  Blender-flavored `d3.create('svg')` -- a join's root container.
+  Base `SceneAdapter` does bookkeeping generically (updates
+  `.collections`/`._collection_parent` directly, so it doesn't need
+  another `get_adapter()` call afterward); `LiveBlenderAdapter` overrides
+  it fully (same pattern as `remove()`) because a real
+  `bpy.data.collections.new()` result also needs linking into the scene
+  -- otherwise it's an orphan datablock, invisible in the outliner.
+
+**Explicitly out of scope for now: axes and tick labels.** There's no 3D
+analogue of an SVG axis, and building one (line/text geometry along a
+scale, `bpy.data.curves`-based tick labels) is a real design decision
+about what a Blender "axis" should even look like -- not a thin wrapper
+like the two things above. Don't add it as a side effect of some other
+task; it needs its own discussion first.
+
 ## Things that are genuinely custom (no library does this)
 
 - The axis/combinator split and the numeric-attribute/pseudo-class
@@ -125,8 +155,8 @@ real-Blender equivalent, since object creation there goes through
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full suite, ~22 tests
-python examples/bar_chart.py    # and the other 4 in examples/
+pytest                          # full suite, ~35 tests
+python examples/bar_chart.py    # and the other 5 in examples/ (one needs Blender)
 ```
 
 ## If asked to extend this

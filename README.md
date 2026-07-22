@@ -139,9 +139,29 @@ like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
 - `scale_band(domain_items, range_, padding=0.1)` -- `.bandwidth()`, `.step`
 - `scale_ordinal(domain_items, range_)` -- cycles if there are more items than range values
 
+### `d3blender.array` (mirrors pieces of d3-array)
+Not flattened into the top-level package -- `max`/`min`/`bin` collide with
+Python builtins, so import it explicitly: `from d3blender import array`.
+- `array.extent(items, value=None) -> (min, max)`, `array.max(...)`, `array.min(...)`
+- `array.bin(items, value=None, thresholds=10) -> [Bin, ...]` -- buckets
+  `items` into `thresholds` equal-width bins spanning the data's extent.
+  Each `Bin` is a list of the items that fell in it, with `.x0`/`.x1`
+  edges attached, so `len(some_bin)` is the frequency and
+  `array.max(bins, value=len)` gives the tallest bin -- same idiom as
+  d3's `d3.max(bins, d => d.length)`. Simplified vs. d3.bin(): fixed-width
+  bins, not d3's "nice" auto-rounded edges -- fine for sizing bars, not
+  for axis ticks that need to land on round numbers.
+
 ### Adapters
 - `d3blender.adapter.SceneAdapter` -- the engine; works against anything
   shaped like `bpy.data` (duck-typed, see below)
+  - `.get_or_create_collection(name, parent=None)` -- the Blender
+    equivalent of `d3.create('svg')`: get-or-create a named collection to
+    serve as a join's root. Idempotent, so it's safe to call on every
+    rerun. Works the same way on the mock and on `LiveBlenderAdapter`
+    (which additionally links the collection into the scene -- an
+    unlinked `bpy.data.collections.new()` result is an invisible orphan
+    datablock).
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
 - `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier`,
@@ -184,6 +204,12 @@ a deliberate simplicity trade-off: Blender scenes are rarely more than a
 few thousand objects, so rebuilding is cheap, and a cache that can go
 stale is a worse bug than a cache that doesn't exist.
 
+(`get_or_create_collection()` is the one exception -- it updates the
+adapter's own `.collections` list and parent index directly, so it stays
+correct without another `get_adapter()` call. That only covers changes
+made *through* the adapter, though; collections or objects you create
+via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
+
 ## Known limitations
 
 - A selector can't mix collection-axis and parent-axis combinators (see above).
@@ -195,6 +221,12 @@ stale is a worse bug than a cache that doesn't exist.
   scene and intersects with the descendant set, rather than building a
   doc scoped to just that subtree. Fine for typical scene sizes; would be
   worth revisiting for very large scenes.
+- `array.bin()` uses fixed-width bins, not d3's "nice" auto-rounded edges
+  -- fine for sizing bars, not for axis ticks that need round numbers.
+- There's no axis/tick-label equivalent (`d3.axisBottom`, etc.). A 3D
+  scene doesn't have an obvious analogue of an SVG axis, and building one
+  (line/text geometry along a scale) is a real design decision, not a
+  thin wrapper -- deliberately out of scope for now.
 - The `blender_adapter.py` real-Blender glue is unverified against a live
   Blender install (see above).
 
@@ -209,7 +241,8 @@ src/d3blender/
     query.py              selector compiler + soupsieve delegation
     selection.py           Selection / Join
     scale.py                scale_linear / scale_band / scale_ordinal
-    mock.py                  fake bpy-shaped scene for testing
+    array.py                 bin / extent / max / min (mirrors d3-array)
+    mock.py                   fake bpy-shaped scene for testing
 examples/                runnable, mirror the README snippets
 tests/                    pytest suite (uses mock.py, no Blender required)
 ```

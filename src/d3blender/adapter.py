@@ -13,6 +13,32 @@ Two axes, matching Blender's two real hierarchies:
 _MISSING = object()
 
 
+class _Collection:
+    """Minimal duck-typed collection -- name/objects/children plus the
+    generic custom-prop get()/__setitem__ shape everything else in this
+    package expects. This is get_or_create_collection()'s default
+    construction, deliberately self-contained (not d3blender.mock's
+    MockCollection) so adapter.py doesn't depend on the mock/test module.
+    LiveBlenderAdapter overrides construction with a real
+    bpy.data.collections.new(), which also needs linking into the scene
+    to actually be visible."""
+
+    def __init__(self, name):
+        self.name = name
+        self.objects = []
+        self.children = []
+        self._props = {}
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+    def __setitem__(self, key, value):
+        self._props[key] = value
+
+    def __repr__(self):
+        return f'<Collection {self.name}>'
+
+
 def _resolve_one(cur, part):
     if cur is None:
         return None
@@ -119,6 +145,21 @@ class SceneAdapter:
 
     def objects_without_collection(self):
         return [o for o in self.objects if not getattr(o, 'users_collection', None)]
+
+    def get_or_create_collection(self, name, parent=None):
+        """Get-or-create a collection by name -- the Blender equivalent of
+        d3.create('svg'): a container to serve as a join's root. Pass
+        `parent` (another collection already known to this adapter) to
+        nest the new collection instead of adding it at the top level."""
+        for c in self.collections:
+            if self.name_of(c) == name:
+                return c
+        coll = _Collection(name)
+        self.collections.append(coll)
+        if parent is not None:
+            parent.children.append(coll)
+            self._collection_parent.setdefault(id(coll), []).append(parent)
+        return coll
 
     def collection_children_forward(self, el):
         if hasattr(el, 'objects') and hasattr(el, 'children'):

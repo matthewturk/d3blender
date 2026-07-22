@@ -29,7 +29,8 @@ from .adapter import SceneAdapter
 class LiveBlenderAdapter(SceneAdapter):
     """Same as SceneAdapter, except remove() calls the real bpy.data
     removal APIs (which already handle unlinking) instead of the mock's
-    manual list surgery."""
+    manual list surgery, and get_or_create_collection() creates a real
+    bpy collection and links it into the scene."""
 
     def remove(self, el):
         import bpy
@@ -38,6 +39,24 @@ class LiveBlenderAdapter(SceneAdapter):
             bpy.data.collections.remove(el)
         else:
             bpy.data.objects.remove(el, do_unlink=True)
+
+    def get_or_create_collection(self, name, parent=None):
+        """Same contract as SceneAdapter.get_or_create_collection(),
+        except a real bpy.data.collections.new() result also needs
+        linking into the scene (or a parent collection) to actually show
+        up -- an unlinked collection is an orphan datablock, invisible in
+        the outliner/viewport."""
+        import bpy
+
+        for c in self.collections:
+            if self.name_of(c) == name:
+                return c
+        coll = bpy.data.collections.new(name)
+        (parent if parent is not None else bpy.context.scene.collection).children.link(coll)
+        self.collections.append(coll)
+        if parent is not None:
+            self._collection_parent.setdefault(id(coll), []).append(parent)
+        return coll
 
 
 def get_adapter():
