@@ -27,8 +27,13 @@ def _new_tag(soup, el, adapter, ref_map, counter):
     classes = adapter.classes_of(el)
     if classes:
         tag['class'] = ' '.join(sorted(classes))
+    material = adapter.material_of(el)
+    if material:
+        tag['material'] = material
     for key, value in adapter.simple_attrs(el).items():
         # only plain scalars are meaningful as CSS attribute text
+        # (a custom prop literally named "material" would win here,
+        # overriding the synthetic active-material attribute above)
         if isinstance(value, (str, int, float, bool)):
             tag[key] = str(value)
     return tag

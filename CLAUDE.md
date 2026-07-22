@@ -114,6 +114,29 @@ numbers/category names as geometry (`bpy.data.curves`-based font
 objects) is a bigger, separate design question than the line segments
 above -- don't add it as a side effect of some other task.
 
+## Materials are queryable, split the same way modifiers already were
+
+`obj.active_material` (the common single-material case) is exposed as a
+synthetic `material` tag attribute in `scene_doc.py`'s `_new_tag()` --
+`adapter.material_of(el)` reads it, mirroring `type_of`/`name_of`. That
+alone makes `[material=Enemy_Red]` and `[material]` (exists) work through
+soupsieve with **zero new parsing code**, same "let soupsieve do it"
+principle as everything else in `query.py`.
+
+`active_material` only sees one material, though, and a real object can
+have several (`obj.material_slots`, each possibly empty). For "does this
+object have material X *anywhere*," `:has-material(Name)` was added to
+`SceneAdapter.pseudos`, checking membership across every slot -- the
+exact same shape as the pre-existing `:has-modifier(TYPE)`. Follow that
+split for future queryable-but-not-a-custom-prop Blender concepts: a
+synthetic attribute for the "one canonical value" case, a `:has-*()`
+pseudo for the "any of several" case.
+
+`mock.py` mirrors bpy's real shape here too: `MockMaterialSlot.material`
+can be `None` (an empty slot), and `active_material` is a genuinely
+separate mock attribute, not derived from `material_slots` -- don't
+"simplify" that by computing one from the other, since real bpy doesn't.
+
 ## Things that are genuinely custom (no library does this)
 
 - The axis/combinator split and the numeric-attribute/pseudo-class
@@ -168,7 +191,7 @@ above -- don't add it as a side effect of some other task.
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full suite, ~41 tests
+pytest                          # full suite, ~45 tests
 python examples/bar_chart.py    # and the other 5 in examples/ (one needs Blender)
 ```
 

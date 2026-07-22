@@ -17,9 +17,28 @@ class MockModifier:
         self.type = type_
 
 
+class MockMaterial:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return f'<Material {self.name}>'
+
+
+class MockMaterialSlot:
+    """Mirrors bpy's MaterialSlot -- a slot can be empty (`.material is
+    None`), and an object can have several. Real bpy's `active_material`
+    is a separate, direct shortcut attribute, not derived from
+    `material_slots` -- mirrored the same way here."""
+
+    def __init__(self, material=None):
+        self.material = material
+
+
 _OBJECT_REAL_ATTRS = {'name', 'type', 'parent', 'selected', 'hidden',
                        'modifiers', 'users_collection', '_props',
-                       'location', 'scale', 'rotation_euler', '_keyframes'}
+                       'location', 'scale', 'rotation_euler', '_keyframes',
+                       'active_material', 'material_slots'}
 
 
 class MockObject:
@@ -37,6 +56,8 @@ class MockObject:
         self.selected = False
         self.hidden = False
         self.modifiers = []
+        self.active_material = None
+        self.material_slots = []
         self.location = (0.0, 0.0, 0.0)
         self.scale = (1.0, 1.0, 1.0)
         self.rotation_euler = (0.0, 0.0, 0.0)

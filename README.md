@@ -56,9 +56,18 @@ type            mesh, camera, light, collection, armature, ...
 [key=val]       attribute equals val
 [key>val]       [key<val] [key>=val] [key<=val] [key!=val] -- numeric comparison
 :pseudo         a predicate registered on the adapter (:selected, :visible, :hidden, ...)
-:pseudo(arg)    a predicate with an argument (:has-modifier(BEVEL))
+:pseudo(arg)    a predicate with an argument (:has-modifier(BEVEL), :has-material(Enemy_Red))
 a, b            union, same as CSS
 ```
+
+**Materials** aren't a custom property, but they're queryable the same
+way: `material` is a synthetic attribute exposing `obj.active_material`,
+so `[material=Enemy_Red]` and `[material]` (has *some* active material)
+work like any other attribute selector. That only sees the *active*
+material, though -- an object can have several material slots, so
+`:has-material(Enemy_Red)` checks membership across all of them, mirroring
+`:has-modifier`. (A custom property literally named `material` would
+shadow the synthetic one -- unlikely, but worth knowing.)
 
 **Bare word = type, `#name` = a specific instance.** `Weapons > mesh` does
 *not* mean "children of the Weapons collection" -- `Weapons` there is
@@ -183,9 +192,10 @@ segment per tick value.
     than one object per segment. See `d3blender.axis` above.
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
-- `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier`,
-  a fake scene shaped like `bpy.data` for testing without Blender installed;
-  `new_scene(name)` builds an adapter with one collection, and
+- `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier` /
+  `MockMaterial` / `MockMaterialSlot`, a fake scene shaped like `bpy.data`
+  for testing without Blender installed; `new_scene(name)` builds an
+  adapter with one collection, and
   `spawn(adapter, collection, name, type_='MESH', **props)` creates and
   links an object into it -- the demo-scaffolding every example needs
 

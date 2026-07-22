@@ -104,6 +104,9 @@ class SceneAdapter:
             'visible': lambda el, arg: not bool(getattr(el, 'hidden', False)),
             'hidden': lambda el, arg: bool(getattr(el, 'hidden', False)),
             'has-modifier': lambda el, arg: arg in [m.type for m in getattr(el, 'modifiers', [])],
+            'has-material': lambda el, arg: arg in [
+                slot.material.name for slot in getattr(el, 'material_slots', []) if slot.material
+            ],
         }
 
     # -- identity / attributes ------------------------------------------
@@ -114,6 +117,16 @@ class SceneAdapter:
 
     def name_of(self, el):
         return getattr(el, 'name', None)
+
+    def material_of(self, el):
+        """The object's active material name, if any -- exposed to the
+        selector engine as a synthetic 'material' attribute (see
+        scene_doc.py), so `[material=Enemy_Red]`/`[material]` just work
+        via existing CSS attribute matching. Only sees the *active*
+        material; an object with several material slots but a different
+        (or no) active one needs `:has-material(Name)` instead."""
+        mat = getattr(el, 'active_material', None)
+        return getattr(mat, 'name', None) if mat is not None else None
 
     def classes_of(self, el):
         raw = _resolve_one(el, 'd3_class') or ''
