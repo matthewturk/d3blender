@@ -5,20 +5,9 @@ Run: python examples/scatter_plot.py
 """
 
 from d3blender import select, scale_linear, scale_ordinal
-from d3blender.adapter import SceneAdapter
-from d3blender.mock import MockObject, MockCollection
+from d3blender.mock import new_scene, spawn
 
-chart = MockCollection('Chart')
-adapter = SceneAdapter(objects=[], collections=[chart])
-
-
-def add_cube(name):
-    o = MockObject(name, 'MESH')
-    chart.objects.append(o)
-    o.users_collection = (chart,)
-    adapter.objects.append(o)
-    return o
-
+adapter, chart = new_scene('Chart')
 
 points = [
     {'id': 0, 'period': 4.2, 'radius': 15.6, 'method': 'transit'},
@@ -32,7 +21,7 @@ color = scale_ordinal(['transit', 'radial_velocity'], range_=['#E8B75D', '#5B8DE
 
 scatter = (select(adapter, '#Chart mesh')
            .data(points, key=lambda i, d: d['id'])
-           .join(enter=lambda d: add_cube(f"pt_{d['id']}")))
+           .join(enter=lambda d: spawn(adapter, chart, f"pt_{d['id']}")))
 
 for el, d in zip(scatter.elements, points):
     el.location = (px(d['period']), py(d['radius']), 0)

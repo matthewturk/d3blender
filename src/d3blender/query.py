@@ -1,5 +1,5 @@
 """
-query.py — public `select()`. Compiles a selector string down to:
+query.py — public `select()`. Given a string, compiles a selector down to:
 
   (axis, css_selector_string, predicates)
 
@@ -14,6 +14,10 @@ as a plain Python filter over the matched elements afterward.
 Limitation, stated up front rather than hidden: a single selector must stay
 on one axis. "Rig ~ Weapons > mesh" mixes both and is rejected -- write it
 as two queries and intersect/chain them.
+
+`select()` also accepts a non-string target -- a single element or an
+iterable of elements -- and just wraps it in a `Selection`, no CSS
+involved. See its docstring.
 """
 
 import re
@@ -142,8 +146,18 @@ def _predicates_ok(adapter, el, predicates):
     return True
 
 
-def select(adapter, selector_str):
-    axis, css, predicates = compile_query(selector_str)
+def select(adapter, target):
+    """`target` is either a selector string, or -- mirroring d3's
+    `d3.select(node)` -- an element (or iterable of elements) to wrap
+    directly, bypassing CSS entirely. Use the latter to re-wrap an element
+    you already have (e.g. to `.keyframe()` it) instead of round-tripping
+    it through `#name`: Blender's own auto-suffixed names ("Cube.001")
+    aren't valid CSS id-selector text, since CSS reads the dot as a class."""
+    if not isinstance(target, str):
+        elements = list(target) if hasattr(target, '__iter__') else [target]
+        return Selection(adapter, elements)
+
+    axis, css, predicates = compile_query(target)
     soup, ref_map = build_collection_doc(adapter) if axis == 'collection' else build_parent_doc(adapter)
     seen, elements = set(), []
     for tag in soup.scene.select(css):

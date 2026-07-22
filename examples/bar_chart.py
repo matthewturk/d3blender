@@ -5,22 +5,9 @@ Run: python examples/bar_chart.py
 """
 
 from d3blender import select, scale_linear, scale_band, scale_ordinal
-from d3blender.adapter import SceneAdapter
-from d3blender.mock import MockObject, MockCollection
+from d3blender.mock import new_scene, spawn
 
-chart = MockCollection('Chart')
-adapter = SceneAdapter(objects=[], collections=[chart])
-
-
-def add_cube(name):
-    """Stand-in for bpy.ops.mesh.primitive_cube_add() + rename, or
-    databpy's db.create_object('CUBE', name=name)."""
-    o = MockObject(name, 'MESH')
-    chart.objects.append(o)
-    o.users_collection = (chart,)
-    adapter.objects.append(o)
-    return o
-
+adapter, chart = new_scene('Chart')
 
 data = [
     {'label': 'Jan', 'revenue': 12},
@@ -36,7 +23,9 @@ color = scale_ordinal([d['label'] for d in data],
 
 bars = (select(adapter, '#Chart mesh')
         .data(data, key=lambda i, d: d['label'])
-        .join(enter=lambda d: add_cube(f"bar_{d['label']}")))
+        # spawn() stands in for bpy.ops.mesh.primitive_cube_add() + rename,
+        # or databpy's db.create_object('CUBE', name=name)
+        .join(enter=lambda d: spawn(adapter, chart, f"bar_{d['label']}")))
 
 for el, d in zip(bars.elements, data):
     h = height(d['revenue'])

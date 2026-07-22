@@ -106,8 +106,14 @@ height = scale_linear(domain=(0, 100), range_=(0.2, 4.0))
 
 ## API
 
-### `select(adapter, selector_str) -> Selection`
-Top-level query against the whole scene.
+### `select(adapter, target) -> Selection`
+Top-level query against the whole scene. `target` is usually a selector
+string, but -- mirroring d3's `d3.select(node)` -- it can also be an
+element, or an iterable of elements, to wrap directly with no CSS
+involved. Reach for that form to re-wrap an element you already have
+(e.g. to `.keyframe()` it on a rerun): Blender's own auto-suffixed names
+like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
+`.` as a class.
 
 ### `Selection`
 - `.each(fn)` -- calls `fn(el, i)` for every element, returns `self`
@@ -139,7 +145,10 @@ Top-level query against the whole scene.
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
 - `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier`,
-  a fake scene shaped like `bpy.data` for testing without Blender installed
+  a fake scene shaped like `bpy.data` for testing without Blender installed;
+  `new_scene(name)` builds an adapter with one collection, and
+  `spawn(adapter, collection, name, type_='MESH', **props)` creates and
+  links an object into it -- the demo-scaffolding every example needs
 
 ## Using it inside Blender
 

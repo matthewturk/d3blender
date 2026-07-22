@@ -50,3 +50,28 @@ def test_mixed_axis_raises(scene):
     import pytest
     with pytest.raises(ValueError):
         select(scene, 'Rig ~ Weapons > mesh')
+
+
+def test_select_wraps_single_element_directly(scene):
+    sword = select(scene, '#Sword').elements[0]
+    assert names(select(scene, sword)) == ['Sword']
+
+
+def test_select_wraps_element_list_directly(scene):
+    sword = select(scene, '#Sword').elements[0]
+    shield = select(scene, '#Shield').elements[0]
+    assert names(select(scene, [sword, shield])) == ['Shield', 'Sword']
+
+
+def test_select_by_dotted_name_is_not_valid_css(scene):
+    # A `#name` selector goes through CSS, where "." starts a class --
+    # names like Blender's own auto-suffixed "Cube.001" were never valid
+    # here. Re-wrap the element directly instead (see test above).
+    import pytest
+    from d3blender.mock import MockObject
+
+    dotted = MockObject('Sword.001', 'MESH')
+    scene.objects.append(dotted)
+    with pytest.raises(Exception):
+        select(scene, f'#{dotted.name}')
+    assert names(select(scene, dotted)) == ['Sword.001']

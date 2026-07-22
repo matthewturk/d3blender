@@ -6,20 +6,9 @@ Run: python examples/update_pattern.py
 """
 
 from d3blender import select, scale_linear, scale_band
-from d3blender.adapter import SceneAdapter
-from d3blender.mock import MockObject, MockCollection
+from d3blender.mock import new_scene, spawn
 
-chart = MockCollection('Chart')
-adapter = SceneAdapter(objects=[], collections=[chart])
-
-
-def add_cube(name):
-    o = MockObject(name, 'MESH')
-    chart.objects.append(o)
-    o.users_collection = (chart,)
-    adapter.objects.append(o)
-    return o
-
+adapter, chart = new_scene('Chart')
 
 data_v1 = [
     {'label': 'Jan', 'revenue': 12},
@@ -38,7 +27,7 @@ def bars():
 
 
 def enter_bar(d):
-    el = add_cube(f"bar_{d['label']}")
+    el = spawn(adapter, chart, f"bar_{d['label']}")
     h = height(d['revenue'])
     el.location = (x(d['label']), 0, h / 2)
     el.scale = (x.bandwidth() / 2, 0.5, h / 2)
@@ -48,7 +37,7 @@ def enter_bar(d):
 
 def update_bar(el, d):
     new_h = height(d['revenue'])
-    sel = select(adapter, f'#{el.name}')
+    sel = select(adapter, el)  # re-wrap the known element -- no CSS round trip
     sel.keyframe(1, location=el.location, scale=el.scale)                       # hold current pose
     sel.keyframe(FPS, location=(x(d['label']), 0, new_h / 2),
                  scale=(x.bandwidth() / 2, 0.5, new_h / 2))                     # animate to new height

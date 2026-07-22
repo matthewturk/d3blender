@@ -1,5 +1,15 @@
 """A tiny fake scene mimicking bpy's shape closely enough to test the
-selector engine and Selection without Blender installed."""
+selector engine and Selection without Blender installed.
+
+`new_scene()` and `spawn()` are demo/test scaffolding, not part of the
+selector engine: every example script needs to (1) build an adapter with
+one collection and (2) turn a data point into a linked object, and that
+linking dance (append to the collection, set `users_collection`, register
+with the adapter) was getting hand-rolled identically in every one. Real
+Blender usage doesn't need `spawn()` -- object creation there goes through
+`bpy.ops`/`bpy.data.objects.new()`, which is a different shape entirely."""
+
+from .adapter import SceneAdapter
 
 
 class MockModifier:
@@ -69,3 +79,22 @@ class MockCollection:
 
     def __repr__(self):
         return f'<Collection {self.name}>'
+
+
+def new_scene(collection_name='Chart'):
+    """A fresh adapter with one top-level collection -- the usual starting
+    point for an example or test. Returns (adapter, collection)."""
+    collection = MockCollection(collection_name)
+    adapter = SceneAdapter(objects=[], collections=[collection])
+    return adapter, collection
+
+
+def spawn(adapter, collection, name, type_='MESH', **props):
+    """Create a MockObject, link it into `collection`, and register it
+    with `adapter` -- the one new object per data point that .join()'s
+    `enter` callback needs to produce."""
+    obj = MockObject(name, type_, **props)
+    collection.objects.append(obj)
+    obj.users_collection = (collection,)
+    adapter.objects.append(obj)
+    return obj
