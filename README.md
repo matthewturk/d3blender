@@ -127,7 +127,13 @@ like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
 ### `Selection`
 - `.each(fn)` -- calls `fn(el, i)` for every element, returns `self`
 - `.attr(key, value=None)` -- getter if `value` is `None` (reads the first
-  element), setter otherwise; `value` can be a plain value or `fn(el, i)`
+  element), setter otherwise; `value` can be a plain value or `fn(el, i)`.
+  `key` reaches into nested properties (modifiers, geometry nodes inputs --
+  see below) as either a dot-joined string (`'modifiers.Bevel.width'`) or
+  a tuple of segments (`('modifiers', 'Scatter.001', 'Size')`); use the
+  tuple form whenever a name in the chain might itself contain a `.`
+  (Blender auto-suffixes duplicate modifiers/node groups the same way it
+  does object names)
 - `.keyframe(frame, **attrs)` -- sets each attr and drops a real Blender
   keyframe at `frame`. Blender's own F-curves do the interpolation, so
   this is the whole "transition" story: `sel.keyframe(1, location=a).keyframe(30, location=b)`
@@ -142,6 +148,42 @@ like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
   identity (a stamped `d3_key` custom property). `enter(d)` must return
   the created element; `update(el, d)` and `exit(el)` are optional (a
   missing `exit` just calls `adapter.remove(el)`).
+
+### Modifiers and Geometry Nodes inputs
+`adapter.get_attr`/`.set_attr` (and therefore `Selection.attr`) walk
+nested paths generically -- `getattr` → `.get()` → subscript at each
+segment -- so a plain modifier's ordinary properties are already
+reachable: `select(adapter, '#Rig mesh').attr('modifiers.Bevel.width', 0.4)`.
+
+Geometry Nodes inputs are the one case plain attribute access can't
+reach on its own: they're stored under opaque keys (`modifier["Input_2"]`),
+and the human-readable name ("Size") only exists in the node group's
+interface. The path-walker has one extra fallback for exactly this: when
+a segment lands on a `NODES` modifier, the next segment is looked up by
+name against `modifier.node_group.interface.items_tree` (the Blender
+4.0+/5.x shape -- no legacy `node_group.inputs` support) and resolved to
+its real key automatically. So the same syntax reaches Geometry Nodes
+inputs too, no special-cased API:
+
+```python
+select(adapter, '#Chart mesh').attr(('modifiers', 'Scatter', 'Size'), 2.0)
+```
+
+- `adapter.gn_inputs(modifier) -> {name: value}` -- lists every input on
+  a Geometry Nodes modifier's interface, for inspecting what's available
+  before you `.attr()` into one of them by name.
+- **Always use the tuple form, not the dot-joined string, once you're not
+  sure a name is dot-free.** Node groups and modifiers get `.001`-style
+  auto-suffixes exactly like objects do, and the string form's `.split('.')`
+  can't tell "part of a name" from "the next path segment" apart --
+  `'modifiers.Scatter.001.Size'` silently resolves to nothing, while
+  `('modifiers', 'Scatter.001', 'Size')` is always correct, since nothing
+  gets split.
+- **The `[key...]` bracket-selector syntax can't express this at all** --
+  it's a single unescaped CSS-style string, so a dotted or spaced name
+  (GN inputs are often multi-word, like "Instance Count") can't be
+  selected/filtered on that way. Use `.filter(lambda el: adapter.get_attr(el, (...)) > x)`
+  instead of `[modifiers.Scatter.Instance Count>2]` (which doesn't parse).
 
 ### `scale.py`
 - `scale_linear(domain, range_)` -- `.invert(y)` also available
@@ -190,12 +232,15 @@ segment per tick value.
   - `.create_line_mesh(collection, name, segments)` -- one mesh object
     containing one edge per `(p0, p1)` segment (e.g. axis ticks), rather
     than one object per segment. See `d3blender.axis` above.
+  - `.gn_inputs(modifier)` -- `{name: value}` for a Geometry Nodes
+    modifier's inputs. See "Modifiers and Geometry Nodes inputs" above.
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
 - `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier` /
-  `MockMaterial` / `MockMaterialSlot`, a fake scene shaped like `bpy.data`
-  for testing without Blender installed; `new_scene(name)` builds an
-  adapter with one collection, and
+  `MockModifierCollection` / `MockMaterial` / `MockMaterialSlot` /
+  `MockNodeGroup` / `MockNodeGroupInterface` / `MockNodeGroupInterfaceItem`,
+  a fake scene shaped like `bpy.data` for testing without Blender
+  installed; `new_scene(name)` builds an adapter with one collection, and
   `spawn(adapter, collection, name, type_='MESH', **props)` creates and
   links an object into it -- the demo-scaffolding every example needs
 
@@ -257,6 +302,13 @@ via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
   names rendered as text). Text/label geometry (`bpy.data.curves`-based
   font objects) is a bigger, separate design question -- deliberately
   out of scope for now.
+- Geometry Nodes input lookup assumes the Blender 4.0+/5.x interface
+  shape (`node_group.interface.items_tree`) -- no fallback to the
+  pre-4.0 `node_group.inputs` API.
+- The `[key...]` bracket-selector syntax can't reach a dotted or
+  spaced nested name (a modifier/node-group name with a `.001` suffix, a
+  multi-word Geometry Nodes input) -- it's a single unescaped string.
+  Use `.filter(lambda el: adapter.get_attr(el, (...)) > x)` for those.
 - The `blender_adapter.py` real-Blender glue is unverified against a live
   Blender install (see above).
 

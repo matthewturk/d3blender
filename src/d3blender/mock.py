@@ -13,8 +13,74 @@ from .adapter import SceneAdapter
 
 
 class MockModifier:
-    def __init__(self, type_):
+    """Real bpy modifiers are addressable by name (auto-uniquified with
+    `.001` suffixes, exactly like object/collection names), so `.name`
+    defaults to `type_` rather than being omitted. `node_group` is only
+    meaningful for `type_='NODES'` (Geometry Nodes) modifiers; a plain
+    modifier just leaves it None and gets/sets ordinary attributes
+    (`.width`, `.levels`, ...) the normal Python way -- no `__setattr__`
+    restriction here, unlike MockObject."""
+
+    def __init__(self, type_, name=None, node_group=None, **props):
         self.type = type_
+        self.name = name or type_
+        self.node_group = node_group
+        self._props = dict(props)
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+    def __setitem__(self, key, value):
+        self._props[key] = value
+
+    def __getitem__(self, key):
+        return self._props[key]
+
+    def __repr__(self):
+        return f'<Modifier {self.name!r} type={self.type!r}>'
+
+
+class MockModifierCollection(list):
+    """Mirrors bpy's modifiers collection: plain list iteration/indexing,
+    plus name-based lookup (`.get(name)`, `['name']`) -- needed since
+    path-based attribute access (adapter.get_attr/set_attr) resolves a
+    modifier by name, the same way a collection is resolved by name."""
+
+    def get(self, name, default=None):
+        for m in self:
+            if m.name == name:
+                return m
+        return default
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            for m in self:
+                if m.name == key:
+                    return m
+            raise KeyError(key)
+        return super().__getitem__(key)
+
+
+class MockNodeGroupInterfaceItem:
+    """One row of a Geometry Nodes group's interface (Blender 4.0+/5.x
+    shape: `node_group.interface.items_tree`) -- `name` is the
+    human-readable socket name, `identifier` the underlying ID-property
+    key (`modifier[identifier]`) that actually stores the value."""
+
+    def __init__(self, name, identifier, in_out='INPUT'):
+        self.name = name
+        self.identifier = identifier
+        self.in_out = in_out
+
+
+class MockNodeGroupInterface:
+    def __init__(self, items=()):
+        self.items_tree = list(items)
+
+
+class MockNodeGroup:
+    def __init__(self, items=()):
+        self.interface = MockNodeGroupInterface(items)
 
 
 class MockMaterial:
@@ -55,7 +121,7 @@ class MockObject:
         self.parent = parent
         self.selected = False
         self.hidden = False
-        self.modifiers = []
+        self.modifiers = MockModifierCollection()
         self.active_material = None
         self.material_slots = []
         self.location = (0.0, 0.0, 0.0)

@@ -137,6 +137,56 @@ can be `None` (an empty slot), and `active_material` is a genuinely
 separate mock attribute, not derived from `material_slots` -- don't
 "simplify" that by computing one from the other, since real bpy doesn't.
 
+## `get_attr`/`set_attr` take a string OR a tuple path -- and reach into Geometry Nodes
+
+`get_attr`/`set_attr` (and therefore `Selection.attr`) walk nested paths
+generically (`getattr` → `.get()` → subscript at each segment), so
+`'modifiers.Bevel.width'` already worked for the *read* side before this
+existed -- `set_attr` didn't have the same path-walk at all, just a flat
+`setattr`/subscript on `el` directly. Both now share the same walker.
+
+**String vs. tuple is the same escape hatch as `select(adapter, el)` vs.
+`select(adapter, f'#{el.name}')`.** A dot-joined string is convenient but
+ambiguous the instant any name in the chain contains a literal `.` --
+Blender auto-suffixes duplicate modifiers and node groups with `.001`
+exactly like it does object names, so `'modifiers.Scatter.001.Size'`
+silently mis-splits into 4 segments instead of 3 and resolves to nothing.
+A tuple of segments (`('modifiers', 'Scatter.001', 'Size')`) never
+splits, so it's always correct. Don't "fix" the string form with escaping
+syntax -- that's exactly the hand-rolled-parser trap this codebase
+already ripped out once (see the top of this file). The tuple form is
+the answer, not a smarter splitter.
+
+**Geometry Nodes inputs are the one thing plain attribute-walking
+genuinely can't reach on its own**, because the human-readable name
+("Size") isn't a real attribute or dict key on the modifier -- it only
+exists in the node group's interface, which maps it to the actual
+ID-property key (`"Input_2"`) that stores the value. `_gn_input_identifier()`
+in `adapter.py` does that lookup, duck-typed against
+`modifier.node_group.interface.items_tree` (the Blender 4.0+/5.x shape --
+this project targets 5.3+, so there's deliberately no fallback to the
+older `node_group.inputs` API). It's wired into `_resolve_one()` for
+reads and `set_attr()`'s final-segment logic for writes, as one more
+fallback after plain attribute/dict/subscript access fails -- so the
+exact same path syntax reaches ordinary modifier properties and GN
+inputs alike, no separate API. `adapter.gn_inputs(modifier)` lists
+`{name: value}` for a modifier's inputs, for inspection.
+
+`mock.py`'s `MockObject.modifiers` had to stop being a bare list and
+become `MockModifierCollection` (name-addressable, like real bpy's
+modifiers collection) for name-based path resolution to find a modifier
+by name at all -- this was a latent gap, not something GN introduced.
+`MockNodeGroup`/`MockNodeGroupInterface`/`MockNodeGroupInterfaceItem`
+mirror the `items_tree` shape closely enough to test the lookup without
+touching bpy.
+
+**The `[key...]` bracket-selector syntax still can't express any of
+this** for dotted-or-spaced names -- it's a single unescaped CSS string,
+and GN inputs are frequently multi-word ("Instance Count"). That's a
+selector-syntax limitation, not a path-walker one; `.filter(lambda el:
+adapter.get_attr(el, (...)) > x)` is the answer there, and it isn't
+worth solving by inventing string escaping.
+
 ## Things that are genuinely custom (no library does this)
 
 - The axis/combinator split and the numeric-attribute/pseudo-class
@@ -191,7 +241,7 @@ separate mock attribute, not derived from `material_slots` -- don't
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full suite, ~45 tests
+pytest                          # full suite, ~53 tests
 python examples/bar_chart.py    # and the other 5 in examples/ (one needs Blender)
 ```
 

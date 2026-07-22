@@ -39,6 +39,24 @@ class _Collection:
         return f'<Collection {self.name}>'
 
 
+def _gn_input_identifier(modifier, name):
+    """If `modifier` is a Geometry Nodes modifier exposing a node-group
+    interface (Blender 4.0+/5.x shape: `node_group.interface.items_tree`),
+    resolve a human-readable input socket name ("Size") to the underlying
+    ID-property key ("Input_2") that actually stores the value. None if
+    there's no match -- duck-typed, so this works the same against the
+    mock and real bpy, no bpy import needed."""
+    node_group = getattr(modifier, 'node_group', None)
+    interface = getattr(node_group, 'interface', None)
+    items = getattr(interface, 'items_tree', None)
+    if items is None:
+        return None
+    for item in items:
+        if getattr(item, 'in_out', None) == 'INPUT' and getattr(item, 'name', None) == name:
+            return getattr(item, 'identifier', None)
+    return None
+
+
 def _resolve_one(cur, part):
     if cur is None:
         return None
@@ -56,7 +74,14 @@ def _resolve_one(cur, part):
     try:
         return cur[part]
     except Exception:
-        return None
+        pass
+    identifier = _gn_input_identifier(cur, part)
+    if identifier is not None:
+        try:
+            return cur[identifier]
+        except Exception:
+            return None
+    return None
 
 
 class _MeshObject:
@@ -133,8 +158,15 @@ class SceneAdapter:
         return set(raw.split())
 
     def get_attr(self, el, path):
+        """`path` is either a dot-joined string ("modifiers.Bevel.width"
+        -- convenient, but ambiguous if any name in the chain contains a
+        literal '.', e.g. an auto-uniquified "Scatter.001" modifier) or a
+        tuple of segments ("modifiers", "Scatter.001", "width") -- always
+        unambiguous, since no splitting happens. Reach for the tuple form
+        whenever a name might contain a dot."""
+        parts = path.split('.') if isinstance(path, str) else list(path)
         cur = el
-        for part in path.split('.'):
+        for part in parts:
             cur = _resolve_one(cur, part)
         return cur
 
@@ -153,11 +185,46 @@ class SceneAdapter:
                 return {}
         return {}
 
-    def set_attr(self, el, key, value):
+    def set_attr(self, el, path, value):
+        """Same string-vs-tuple contract as get_attr(). Walks to the
+        second-to-last segment, then sets the last one -- through a
+        Geometry Nodes input's name if that's what it resolves to
+        (see _gn_input_identifier), otherwise a plain setattr/subscript
+        exactly like before path support existed."""
+        parts = path.split('.') if isinstance(path, str) else list(path)
+        *init, last = parts
+        cur = el
+        for part in init:
+            cur = _resolve_one(cur, part)
+        identifier = _gn_input_identifier(cur, last)
+        if identifier is not None:
+            cur[identifier] = value
+            return
         try:
-            setattr(el, key, value)
+            setattr(cur, last, value)
         except Exception:
-            el[key] = value
+            cur[last] = value
+
+    def gn_inputs(self, modifier):
+        """{name: current_value} for every input socket on a Geometry
+        Nodes modifier's node-group interface -- for inspecting what's
+        available before .attr()-ing into one of them by name."""
+        node_group = getattr(modifier, 'node_group', None)
+        interface = getattr(node_group, 'interface', None)
+        items = getattr(interface, 'items_tree', None) or []
+        result = {}
+        for item in items:
+            if getattr(item, 'in_out', None) != 'INPUT':
+                continue
+            name = getattr(item, 'name', None)
+            identifier = getattr(item, 'identifier', None)
+            if name is None or identifier is None:
+                continue
+            try:
+                result[name] = modifier[identifier]
+            except Exception:
+                result[name] = None
+        return result
 
     def keyframe_insert(self, el, data_path, frame):
         el.keyframe_insert(data_path=data_path, frame=frame)
