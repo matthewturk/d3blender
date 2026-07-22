@@ -152,6 +152,22 @@ Python builtins, so import it explicitly: `from d3blender import array`.
   bins, not d3's "nice" auto-rounded edges -- fine for sizing bars, not
   for axis ticks that need to land on round numbers.
 
+### `d3blender.axis`
+The "ticks are just a set of lines" version of d3's `axisBottom()`/
+`axisLeft()` -- no domain baseline, no tick-label text, just a short line
+segment per tick value.
+- `axis.ticks(domain, count=10)` -- `count` evenly spaced values across
+  `domain` (same fixed-width simplification as `array.bin()`, not d3's
+  "nice" rounded values)
+- `axis.tick_lines(scale, values, place, tick_vector) -> [(p0, p1), ...]`
+  -- one 3D line segment per tick value. `place(scale(v)) -> (x, y, z)`
+  and `tick_vector` (a fixed `(dx, dy, dz)` offset) are supplied by the
+  caller, since d3blender charts don't share one fixed 2D plane (compare
+  `bar_chart.py`, which stands bars up along z, to `scatter_plot.py`,
+  which lies flat at z=0)
+- Feed the result straight to `adapter.create_line_mesh(collection, name,
+  segments)` (below) to turn it into an object
+
 ### Adapters
 - `d3blender.adapter.SceneAdapter` -- the engine; works against anything
   shaped like `bpy.data` (duck-typed, see below)
@@ -162,6 +178,9 @@ Python builtins, so import it explicitly: `from d3blender import array`.
     (which additionally links the collection into the scene -- an
     unlinked `bpy.data.collections.new()` result is an invisible orphan
     datablock).
+  - `.create_line_mesh(collection, name, segments)` -- one mesh object
+    containing one edge per `(p0, p1)` segment (e.g. axis ticks), rather
+    than one object per segment. See `d3blender.axis` above.
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
 - `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier`,
@@ -223,10 +242,11 @@ via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
   worth revisiting for very large scenes.
 - `array.bin()` uses fixed-width bins, not d3's "nice" auto-rounded edges
   -- fine for sizing bars, not for axis ticks that need round numbers.
-- There's no axis/tick-label equivalent (`d3.axisBottom`, etc.). A 3D
-  scene doesn't have an obvious analogue of an SVG axis, and building one
-  (line/text geometry along a scale) is a real design decision, not a
-  thin wrapper -- deliberately out of scope for now.
+- `d3blender.axis` covers tick marks (line segments) only -- no domain
+  baseline and no tick-label text (`d3.axisBottom`'s numbers/category
+  names rendered as text). Text/label geometry (`bpy.data.curves`-based
+  font objects) is a bigger, separate design question -- deliberately
+  out of scope for now.
 - The `blender_adapter.py` real-Blender glue is unverified against a live
   Blender install (see above).
 
@@ -242,7 +262,8 @@ src/d3blender/
     selection.py           Selection / Join
     scale.py                scale_linear / scale_band / scale_ordinal
     array.py                 bin / extent / max / min (mirrors d3-array)
-    mock.py                   fake bpy-shaped scene for testing
+    axis.py                   ticks / tick_lines (line-segment tick marks)
+    mock.py                    fake bpy-shaped scene for testing
 examples/                runnable, mirror the README snippets
 tests/                    pytest suite (uses mock.py, no Blender required)
 ```

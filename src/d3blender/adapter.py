@@ -59,6 +59,41 @@ def _resolve_one(cur, part):
         return None
 
 
+class _MeshObject:
+    """Minimal duck-typed mesh object -- just enough shape (name/type/
+    parent/custom-props) for the selector engine and Selection to treat
+    it like any other object. Holds the raw (vertices, edges) as
+    `.mesh_data`, since there's no real geometry to inspect otherwise.
+    This is create_line_mesh()'s default construction; LiveBlenderAdapter
+    overrides it with a real bpy.data.meshes.new()+from_pydata()."""
+
+    def __init__(self, name, vertices, edges):
+        self.name = name
+        self.type = 'MESH'
+        self.parent = None
+        self.mesh_data = (vertices, edges)
+        self._props = {}
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+    def __setitem__(self, key, value):
+        self._props[key] = value
+
+    def __repr__(self):
+        return f'<Object {self.name}>'
+
+
+def _segments_to_vertices_edges(segments):
+    vertices, edges = [], []
+    for p0, p1 in segments:
+        i = len(vertices)
+        vertices.append(tuple(p0))
+        vertices.append(tuple(p1))
+        edges.append((i, i + 1))
+    return vertices, edges
+
+
 class SceneAdapter:
     def __init__(self, objects, collections):
         self.objects = list(objects)
@@ -160,6 +195,20 @@ class SceneAdapter:
             parent.children.append(coll)
             self._collection_parent.setdefault(id(coll), []).append(parent)
         return coll
+
+    def create_line_mesh(self, collection, name, segments):
+        """Create a single mesh object containing one edge per (p0, p1)
+        pair in `segments` (e.g. one edge per axis tick mark from
+        d3blender.axis.tick_lines()), linked into `collection` -- much
+        cheaper than one object per segment. Base implementation builds a
+        minimal duck-typed mesh object; LiveBlenderAdapter overrides
+        construction with a real bpy mesh."""
+        vertices, edges = _segments_to_vertices_edges(segments)
+        obj = _MeshObject(name, vertices, edges)
+        obj.users_collection = (collection,)
+        collection.objects.append(obj)
+        self.objects.append(obj)
+        return obj
 
     def collection_children_forward(self, el):
         if hasattr(el, 'objects') and hasattr(el, 'children'):

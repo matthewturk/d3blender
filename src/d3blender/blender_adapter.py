@@ -23,14 +23,15 @@ something in here doesn't match your Blender version, please open an
 issue with the version number and the mismatch.
 """
 
-from .adapter import SceneAdapter
+from .adapter import SceneAdapter, _segments_to_vertices_edges
 
 
 class LiveBlenderAdapter(SceneAdapter):
     """Same as SceneAdapter, except remove() calls the real bpy.data
     removal APIs (which already handle unlinking) instead of the mock's
-    manual list surgery, and get_or_create_collection() creates a real
-    bpy collection and links it into the scene."""
+    manual list surgery, get_or_create_collection() creates a real bpy
+    collection and links it into the scene, and create_line_mesh()
+    builds a real bpy mesh."""
 
     def remove(self, el):
         import bpy
@@ -57,6 +58,21 @@ class LiveBlenderAdapter(SceneAdapter):
         if parent is not None:
             self._collection_parent.setdefault(id(coll), []).append(parent)
         return coll
+
+    def create_line_mesh(self, collection, name, segments):
+        """Same contract as SceneAdapter.create_line_mesh(), except it
+        builds a real bpy mesh (bpy.data.meshes.new() + from_pydata())
+        instead of the duck-typed stand-in."""
+        import bpy
+
+        vertices, edges = _segments_to_vertices_edges(segments)
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(vertices, edges, [])
+        mesh.update()
+        obj = bpy.data.objects.new(name, mesh)
+        collection.objects.link(obj)
+        self.objects.append(obj)
+        return obj
 
 
 def get_adapter():

@@ -32,3 +32,23 @@ def test_spawned_object_is_queryable_under_a_newly_created_collection():
     chart = adapter.get_or_create_collection('Chart')
     spawn(adapter, chart, 'bar_0')
     assert [el.name for el in select(adapter, '#Chart mesh')] == ['bar_0']
+
+
+def test_create_line_mesh_is_a_single_object_with_one_edge_per_segment():
+    adapter = SceneAdapter(objects=[], collections=[])
+    chart = adapter.get_or_create_collection('Chart')
+    segments = [((0, 0, 0), (1, 0, 0)), ((2, 0, 0), (3, 0, 0)), ((4, 0, 0), (5, 0, 0))]
+
+    ticks = adapter.create_line_mesh(chart, 'ticks', segments)
+
+    assert [el.name for el in select(adapter, '#Chart mesh')] == ['ticks']
+    vertices, edges = ticks.mesh_data
+    assert len(edges) == len(segments)
+    assert len(vertices) == 2 * len(segments)
+
+
+def test_create_line_mesh_does_not_double_count_via_objects_without_collection():
+    adapter = SceneAdapter(objects=[], collections=[])
+    chart = adapter.get_or_create_collection('Chart')
+    adapter.create_line_mesh(chart, 'ticks', [((0, 0, 0), (1, 0, 0))])
+    assert adapter.objects_without_collection() == []

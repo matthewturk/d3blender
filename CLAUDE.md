@@ -94,12 +94,25 @@ opinion about yet:
   `bpy.data.collections.new()` result also needs linking into the scene
   -- otherwise it's an orphan datablock, invisible in the outliner.
 
-**Explicitly out of scope for now: axes and tick labels.** There's no 3D
-analogue of an SVG axis, and building one (line/text geometry along a
-scale, `bpy.data.curves`-based tick labels) is a real design decision
-about what a Blender "axis" should even look like -- not a thin wrapper
-like the two things above. Don't add it as a side effect of some other
-task; it needs its own discussion first.
+**Axis ticks now exist, scoped down to lines only.** `axis.py` mirrors
+d3's `axisBottom()`/`axisLeft()` with no domain baseline and no
+tick-label text -- `axis.ticks(domain, count)` picks values (same
+fixed-width simplification as `array.bin()`), `axis.tick_lines(scale,
+values, place, tick_vector)` turns them into `(p0, p1)` segments, and
+`SceneAdapter.create_line_mesh(collection, name, segments)` builds one
+mesh object with one edge per segment (not one object per tick -- see
+`get_or_create_collection()`'s precedent: a line segment is as
+unambiguous a "thing" as a collection, unlike picking a primitive shape
+for a data point). `place`/`tick_vector` are deliberately the caller's
+job, not `axis.py`'s -- d3blender charts don't share one fixed 2D plane
+(`bar_chart.py` stands bars up along z at y=0; `scatter_plot.py` lies
+flat at z=0), so `axis.py` can't assume which spatial axis is "the" x or
+y the way an SVG axis can.
+
+**Still explicitly out of scope: tick-label text.** Rendering the actual
+numbers/category names as geometry (`bpy.data.curves`-based font
+objects) is a bigger, separate design question than the line segments
+above -- don't add it as a side effect of some other task.
 
 ## Things that are genuinely custom (no library does this)
 
@@ -155,7 +168,7 @@ task; it needs its own discussion first.
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full suite, ~35 tests
+pytest                          # full suite, ~41 tests
 python examples/bar_chart.py    # and the other 5 in examples/ (one needs Blender)
 ```
 
