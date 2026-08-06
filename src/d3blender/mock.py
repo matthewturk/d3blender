@@ -12,6 +12,36 @@ Blender usage doesn't need `spawn()` -- object creation there goes through
 from .adapter import SceneAdapter
 
 
+class MockGNInputValue:
+    """Mirrors Blender 5.2+'s `modifier.properties.inputs[identifier]` --
+    an RNA property wrapper exposing a Geometry Nodes input's actual
+    value through `.value`, not the plain-idprop bracket access
+    (`modifier[identifier]`) that pre-5.2 Blender used and that now
+    raises "id properties not supported for this type" (see
+    adapter.py's _gn_input_get/_gn_input_set). Real bpy also has a
+    second shape for vector-like sockets -- an IDPropertyGroup needing
+    `["value"]` instead -- not modeled here since nothing exercises it
+    yet; add a dict-like variant alongside this one if a test needs it,
+    following the same `hasattr(holder, 'value')` duck-typed check
+    adapter.py already does."""
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def __repr__(self):
+        return f'<GNInputValue {self.value!r}>'
+
+
+class MockModifierProperties:
+    """Mirrors `modifier.properties` -- just enough to hold `.inputs`,
+    the dict Blender 5.2+ actually stores Geometry Nodes input values in
+    (see MockGNInputValue). Keyed by identifier ("Input_2"), same as the
+    real `items_tree`-derived key."""
+
+    def __init__(self):
+        self.inputs = {}
+
+
 class MockModifier:
     """Real bpy modifiers are addressable by name (auto-uniquified with
     `.001` suffixes, exactly like object/collection names), so `.name`
@@ -19,13 +49,17 @@ class MockModifier:
     meaningful for `type_='NODES'` (Geometry Nodes) modifiers; a plain
     modifier just leaves it None and gets/sets ordinary attributes
     (`.width`, `.levels`, ...) the normal Python way -- no `__setattr__`
-    restriction here, unlike MockObject."""
+    restriction here, unlike MockObject. `.properties.inputs` holds GN
+    input values (see MockModifierProperties); `_props`/`__getitem__`/
+    `__setitem__` remain for ordinary custom properties, unrelated to
+    Geometry Nodes."""
 
     def __init__(self, type_, name=None, node_group=None, **props):
         self.type = type_
         self.name = name or type_
         self.node_group = node_group
         self._props = dict(props)
+        self.properties = MockModifierProperties()
 
     def get(self, key, default=None):
         return self._props.get(key, default)

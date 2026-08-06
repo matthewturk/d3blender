@@ -17,6 +17,22 @@ dependencies = [
 dev = [
     "pytest>=7",
 ]
+blender-test = [
+    # PyPI's headless "bpy" module -- real Blender, no application install
+    # needed, but only ships cp313 wheels, so this extra needs its own
+    # Python 3.13 venv (the main dev venv can stay on whatever version it
+    # likes). Pinned to an exact version, not a range: bpy publishes one
+    # wheel set per Blender release, and this project targets 5.3+ while
+    # the newest wheel on PyPI as of writing is 5.2.0 -- same
+    # newest-available-isn't-quite-current-target gap as nodebpy (see
+    # CLAUDE.md). Bump the pin, don't loosen it, once a 5.3 wheel exists.
+    "bpy==5.2.0; python_version == '3.13'",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "blender: exercises real bpy (tests/blender/) -- needs the blender-test extra; auto-skipped otherwise, see tests/blender/README.md",
+]

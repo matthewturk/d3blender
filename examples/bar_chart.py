@@ -1,7 +1,8 @@
 """
 Bar chart: one cube per data point, height and spacing driven by scales.
 Run: python examples/bar_chart.py
-(swap the mock for d3blender.blender_adapter.get_adapter() to run for real)
+See bar_chart_blender.py for this same script converted to run against a
+real Blender scene instead of the mock.
 """
 
 from d3blender import select, scale_linear, scale_band, scale_ordinal

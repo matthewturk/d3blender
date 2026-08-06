@@ -2,6 +2,7 @@ from d3blender import select
 from d3blender.adapter import SceneAdapter
 from d3blender.mock import (
     MockCollection,
+    MockGNInputValue,
     MockModifier,
     MockNodeGroup,
     MockNodeGroupInterfaceItem,
@@ -16,8 +17,8 @@ def _scatter_object():
         MockNodeGroupInterfaceItem('Geometry', 'Input_0', in_out='OUTPUT'),
     ])
     gn = MockModifier('NODES', name='Scatter', node_group=node_group)
-    gn['Input_2'] = 1.0
-    gn['Input_3'] = 10
+    gn.properties.inputs['Input_2'] = MockGNInputValue(1.0)
+    gn.properties.inputs['Input_3'] = MockGNInputValue(10)
 
     chart = MockCollection('Chart')
     obj = MockObject('Emitter', 'MESH')
@@ -59,7 +60,7 @@ def test_selection_attr_setter_accepts_a_tuple_key():
 def test_dotted_modifier_name_requires_tuple_form():
     node_group = MockNodeGroup([MockNodeGroupInterfaceItem('Size', 'Input_2')])
     gn = MockModifier('NODES', name='Scatter.001', node_group=node_group)
-    gn['Input_2'] = 1.0
+    gn.properties.inputs['Input_2'] = MockGNInputValue(1.0)
     obj = MockObject('Emitter2', 'MESH')
     obj.modifiers.append(gn)
     adapter = SceneAdapter(objects=[obj], collections=[])

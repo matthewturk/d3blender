@@ -101,6 +101,10 @@ pytest
 python examples/bar_chart.py
 ```
 
+That's the full mock-backed suite -- no Blender required. To also run
+against real `bpy` (a separate Python 3.13 venv, since PyPI's headless
+`bpy` module only ships `cp313` wheels), see `tests/blender/README.md`.
+
 ```python
 from d3blender import select, scale_linear
 from d3blender.blender_adapter import get_adapter   # only import this inside Blender
@@ -156,14 +160,19 @@ segment -- so a plain modifier's ordinary properties are already
 reachable: `select(adapter, '#Rig mesh').attr('modifiers.Bevel.width', 0.4)`.
 
 Geometry Nodes inputs are the one case plain attribute access can't
-reach on its own: they're stored under opaque keys (`modifier["Input_2"]`),
-and the human-readable name ("Size") only exists in the node group's
-interface. The path-walker has one extra fallback for exactly this: when
-a segment lands on a `NODES` modifier, the next segment is looked up by
-name against `modifier.node_group.interface.items_tree` (the Blender
+reach on its own: they're stored under opaque keys ("Input_2"), and the
+human-readable name ("Size") only exists in the node group's interface.
+The path-walker has one extra fallback for exactly this: when a segment
+lands on a `NODES` modifier, the next segment is looked up by name
+against `modifier.node_group.interface.items_tree` (the Blender
 4.0+/5.x shape -- no legacy `node_group.inputs` support) and resolved to
-its real key automatically. So the same syntax reaches Geometry Nodes
-inputs too, no special-cased API:
+its real key automatically. Reading/writing the value at that key goes
+through `modifier.properties.inputs[key].value` -- as of Blender 5.2,
+GN modifier inputs stopped being plain ID properties
+(`modifier[key] = value`, which now raises "id properties not supported
+for this type") and moved onto this dedicated RNA property wrapper; this
+project targets 5.3+, so there's no fallback to the pre-5.2 shape. So
+the same syntax reaches Geometry Nodes inputs too, no special-cased API:
 
 ```python
 select(adapter, '#Chart mesh').attr(('modifiers', 'Scatter', 'Size'), 2.0)
@@ -262,11 +271,11 @@ adapter = get_adapter()   # cheap; call fresh whenever the scene may have change
 select(adapter, 'mesh:selected').attr('hp', 100)
 ```
 
-**This has not yet been exercised against a live Blender install** --
-`blender_adapter.py` is written against the documented, stable parts of
-`bpy`'s API, but if something doesn't match your Blender version, that's
-useful information. Please open an issue with the version number and
-what broke.
+This is tested against real `bpy` (PyPI's headless module, see
+`tests/blender/`), but not yet against the full Blender application --
+if something doesn't match your Blender version, that's useful
+information. Please open an issue with the version number and what
+broke.
 
 ### Working with other Blender-scripting libraries
 
@@ -333,8 +342,16 @@ via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
   spaced nested name (a modifier/node-group name with a `.001` suffix, a
   multi-word Geometry Nodes input) -- it's a single unescaped string.
   Use `.filter(lambda el: adapter.get_attr(el, (...)) > x)` for those.
-- The `blender_adapter.py` real-Blender glue is unverified against a live
-  Blender install (see above).
+- `blender_adapter.py` is now tested against real `bpy` (PyPI's headless
+  module, see `tests/blender/`), but not yet against the full Blender
+  application or the `databpy`/`nodebpy`-dependent examples.
+- An object linked *only* into the scene's root collection
+  (`bpy.context.scene.collection`, not a collection you created) is
+  invisible to `select()` -- that root collection isn't itself a member
+  of `bpy.data.collections`, which is what `get_adapter()` builds
+  `adapter.collections` from. Doesn't affect idiomatic usage, since
+  `get_or_create_collection()` always produces a real tracked collection;
+  see CLAUDE.md's Testing status section for the full explanation.
 
 ## Project layout
 
@@ -352,6 +369,7 @@ src/d3blender/
     mock.py                    fake bpy-shaped scene for testing
 examples/                runnable, mirror the README snippets
 tests/                    pytest suite (uses mock.py, no Blender required)
+tests/blender/             real-bpy suite (needs the blender-test extra; see its README.md)
 ```
 
 ## License

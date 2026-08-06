@@ -172,6 +172,25 @@ exact same path syntax reaches ordinary modifier properties and GN
 inputs alike, no separate API. `adapter.gn_inputs(modifier)` lists
 `{name: value}` for a modifier's inputs, for inspection.
 
+**The identifier ("Input_2") isn't itself where the value lives, though
+-- that storage shape changed in Blender 5.2.** Through 5.1, GN modifier
+inputs were plain ID properties (`modifier["Input_2"] = value`); as of
+5.2 that raises `TypeError: bpy_struct[key] = val: id properties not
+supported for this type`, because the value moved onto a dedicated RNA
+property group instead: `modifier.properties.inputs["Input_2"]` is a
+wrapper exposing the real value through `.value` (`["value"]` one level
+deeper for the vector-shaped sockets that report as a nested
+`IDPropertyGroup` instead -- not yet modeled in `mock.py`, since nothing
+exercises it). `_gn_input_get()`/`_gn_input_set()` in `adapter.py` are
+that read/write pair, duck-typed the same way as `_gn_input_identifier`
+(`hasattr(holder, 'value')`, no bpy import) -- this project targets
+5.3+, so there's deliberately no fallback to the pre-5.2 direct-subscript
+shape, same policy as `_gn_input_identifier` having no fallback to the
+older `node_group.inputs` API. `mock.py`'s `MockModifier.properties.inputs`
+(a dict of `MockGNInputValue`, which just holds `.value`) mirrors this
+shape so tests exercise the real code path instead of the old
+`modifier[identifier]` shortcut.
+
 `mock.py`'s `MockObject.modifiers` had to stop being a bare list and
 become `MockModifierCollection` (name-addressable, like real bpy's
 modifiers collection) for name-based path resolution to find a modifier
@@ -213,10 +232,12 @@ or defaults can change between Blender versions, so pin/verify the
 before assuming a node signature still matches what's used here.
 
 This example has no pytest coverage and can't get any -- it needs a
-real Blender plus both packages installed, same category as
-`scatter_plot_3d_blender.py`. It's written against verified, current,
-real APIs, not guessed ones, but that's still not the same claim as
-"run and confirmed working."
+real Blender application plus both packages installed, unlike
+`scatter_plot_3d_blender.py`/`bar_chart_blender.py` (plain `bpy`, no
+add-on packages), which the headless `bpy` module can and does exercise
+(see Testing status below). This one's written against verified,
+current, real APIs, not guessed ones, but that's still not the same
+claim as "run and confirmed working."
 
 ## Things that are genuinely custom (no library does this)
 
@@ -254,26 +275,60 @@ real APIs, not guessed ones, but that's still not the same claim as
 - Everything in `src/d3blender/` except `blender_adapter.py` is tested
   and passing against `d3blender.mock` (a fake scene shaped like
   `bpy.data`, no Blender required). `pytest` runs in well under a second.
-- `blender_adapter.py` has **not** been run against a real Blender
-  install by anyone yet. It's written against documented, stable bpy API
-  (`bpy.data.objects/collections`, `.type`, `.parent`,
-  `.users_collection`, `Collection.objects/.children`, `ID.keys()/.get()`),
-  but "written correctly from documentation" and "verified against a live
-  install" are different claims. If you're asked to fix a bug in real
-  Blender usage, that's the first place to look, and it's expected that
-  something may not match.
+- `blender_adapter.py` **is now also tested against real `bpy`**, in
+  `tests/blender/` -- see that directory's README.md for setup (short
+  version: PyPI's headless `bpy` module, a separate Python 3.13 venv,
+  `pytest tests/blender`). A plain `pytest`/`pytest tests/` from the main
+  dev venv skips this directory cleanly (`pytest.importorskip` in its
+  conftest.py) rather than failing, so it's opt-in, not a tax on the fast
+  path. This closed the gap that let the Blender 5.2+ Geometry Nodes
+  storage-shape break (see the section above) ship unnoticed -- the mock
+  had no way to know the real shape had changed.
+- `examples/bar_chart_blender.py` and `examples/scatter_plot_3d_blender.py`
+  have both now actually been run (not just written) against the headless
+  `bpy` module, via `.venv-blender/bin/python examples/whichever.py`, and
+  their output matches their mock-based counterparts exactly (`.venv-blender`
+  is `tests/blender/`'s venv -- see that directory's README.md -- reused
+  here since it already has a real `bpy` importable). Still **not**
+  covered by anything runnable here: `examples/geometry_nodes_countries.py`,
+  which additionally needs `databpy`/`nodebpy` installed -- neither is a
+  dependency of `d3blender` itself (see that example's own section below),
+  and the headless `bpy` module isn't a substitute for the full Blender
+  application those two libraries assume.
+- One real limitation `tests/blender/` surfaced that the mock couldn't:
+  **`bpy.context.scene.collection` (the scene's root "Scene Collection")
+  is not itself a member of `bpy.data.collections`**, and `get_adapter()`
+  builds `adapter.collections` from exactly that list. An object linked
+  *only* into the scene root (not into any collection you created) is
+  therefore invisible to any selector query -- `select()`'s collection-axis
+  doc has no way to reach it, though `get_attr`/`set_attr` on a
+  directly-held reference still work fine. Idiomatic d3blender code never
+  hits this: `get_or_create_collection()` is the documented way to make a
+  join's root container, and its output always lands in
+  `bpy.data.collections`. Flagging this as a known gap, not fixing it as
+  a side effect of adding tests -- expanding what counts as a "collection"
+  changes `scene_doc.py` semantics and deserves its own discussion, not a
+  drive-by change.
 - Don't report "this works in Blender" unless you've actually run it in
-  Blender. The mock is deliberately strict about attribute access (it
-  raises `AttributeError` for unknown attrs, same as real bpy IDs do) so
-  tests exercise the real code paths, not a lenient stand-in -- but it's
-  still a mock.
+  Blender (the real application, not just the headless `bpy` module) --
+  they're the same API surface for everything `d3blender` touches, but
+  they're still not identical claims. The mock is deliberately strict
+  about attribute access (it raises `AttributeError` for unknown attrs,
+  same as real bpy IDs do) so tests exercise the real code paths, not a
+  lenient stand-in -- but it's still a mock, one layer further removed
+  than either.
 
 ## Commands
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full suite, ~53 tests
+pytest                          # full mock suite, ~53 tests, skips tests/blender/
 python examples/bar_chart.py    # and the other 6 in examples/ (two need Blender)
+
+# real-bpy suite (separate venv, see tests/blender/README.md):
+uv venv --python 3.13 .venv-blender
+uv pip install --python .venv-blender/bin/python -e ".[dev,blender-test]"
+.venv-blender/bin/pytest tests/blender
 ```
 
 ## If asked to extend this

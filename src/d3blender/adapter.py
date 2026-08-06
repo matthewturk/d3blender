@@ -57,6 +57,37 @@ def _gn_input_identifier(modifier, name):
     return None
 
 
+def _gn_input_get(modifier, identifier):
+    """Read a Geometry Nodes input given its identifier (e.g. "Socket_0"
+    -- as of Blender 5.2 the identifiers themselves changed shape too,
+    no longer "Input_N"). GN modifier inputs stopped being plain ID
+    properties (`modifier[identifier]`, which now raises "id properties
+    not supported for this type") and moved onto a dedicated property
+    group: `modifier.properties.inputs[identifier]` is an `IDPropertyGroup`
+    holding the actual value under `["value"]` -- verified against real
+    bpy 5.2.0 (see tests/blender/) for float/int/bool/string/object/vector
+    sockets alike, all `IDPropertyGroup`. The `hasattr(holder, 'value')`
+    branch is a defensive duck-typed fallback for a plain-RNA-property
+    wrapper shape, not one observed in practice -- kept in case some
+    socket type or future version exposes one; don't read it as evidence
+    such a shape currently exists. This project targets 5.3+, so there's
+    deliberately no fallback to the pre-5.2 direct-subscript shape (same
+    policy as _gn_input_identifier's node_group.interface lookup)."""
+    holder = modifier.properties.inputs[identifier]
+    return holder.value if hasattr(holder, 'value') else holder['value']
+
+
+def _gn_input_set(modifier, identifier, value):
+    """Write side of _gn_input_get -- same `["value"]` (or `.value`)
+    access, since `modifier[identifier] = value` now raises "id
+    properties not supported for this type" on Blender 5.2+."""
+    holder = modifier.properties.inputs[identifier]
+    if hasattr(holder, 'value'):
+        holder.value = value
+    else:
+        holder['value'] = value
+
+
 def _resolve_one(cur, part):
     if cur is None:
         return None
@@ -78,7 +109,7 @@ def _resolve_one(cur, part):
     identifier = _gn_input_identifier(cur, part)
     if identifier is not None:
         try:
-            return cur[identifier]
+            return _gn_input_get(cur, identifier)
         except Exception:
             return None
     return None
@@ -189,8 +220,8 @@ class SceneAdapter:
         """Same string-vs-tuple contract as get_attr(). Walks to the
         second-to-last segment, then sets the last one -- through a
         Geometry Nodes input's name if that's what it resolves to
-        (see _gn_input_identifier), otherwise a plain setattr/subscript
-        exactly like before path support existed."""
+        (see _gn_input_identifier/_gn_input_set), otherwise a plain
+        setattr/subscript exactly like before path support existed."""
         parts = path.split('.') if isinstance(path, str) else list(path)
         *init, last = parts
         cur = el
@@ -198,7 +229,7 @@ class SceneAdapter:
             cur = _resolve_one(cur, part)
         identifier = _gn_input_identifier(cur, last)
         if identifier is not None:
-            cur[identifier] = value
+            _gn_input_set(cur, identifier, value)
             return
         try:
             setattr(cur, last, value)
@@ -221,7 +252,7 @@ class SceneAdapter:
             if name is None or identifier is None:
                 continue
             try:
-                result[name] = modifier[identifier]
+                result[name] = _gn_input_get(modifier, identifier)
             except Exception:
                 result[name] = None
         return result
