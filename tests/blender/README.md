@@ -1,7 +1,7 @@
 # Real-`bpy` tests
 
 Everything under `tests/` at the top level runs against `d3blender.mock`
--- no Blender required, and that's still the primary, fast (~53 tests in
+-- no Blender required, and that's still the primary, fast (~73 tests in
 well under a second) suite you get from a plain `pytest` at the repo
 root. This directory is different: it imports the real `bpy` module and
 exercises `blender_adapter.py`'s `LiveBlenderAdapter`, the one file in

@@ -135,10 +135,77 @@ class MockMaterialSlot:
         self.material = material
 
 
+class MockVertex:
+    """Mirrors bpy's MeshVertex, scoped to the one field d3blender's
+    point-attribute machinery touches: `.co`."""
+
+    def __init__(self, co=(0.0, 0.0, 0.0)):
+        self.co = tuple(co)
+
+    def __repr__(self):
+        return f'<MockVertex co={self.co!r}>'
+
+
+class MockPointAttributeItem:
+    """One vertex's worth of a point-domain attribute -- exposes whichever
+    field name (.value/.vector/.color) its attribute's data_type calls
+    for, mirroring the type-dependent shape adapter.py's _POINT_ATTR_SHAPE
+    already expects from real bpy (see there for why: FLOAT/INT/BOOLEAN
+    -> .value, FLOAT_VECTOR -> .vector, FLOAT_COLOR -> .color)."""
+
+    def __init__(self, field, value):
+        setattr(self, field, value)
+
+
+class MockPointAttribute:
+    """Mirrors one entry of bpy's mesh.attributes -- a typed, named,
+    POINT-domain array, one MockPointAttributeItem per vertex."""
+
+    def __init__(self, name, data_type, size):
+        from .adapter import _POINT_ATTR_SHAPE
+        self.name = name
+        self.data_type = data_type
+        self.domain = 'POINT'
+        arity, field = _POINT_ATTR_SHAPE[data_type]
+        default = 0.0 if arity == 1 else (0.0,) * arity
+        self.data = [MockPointAttributeItem(field, default) for _ in range(size)]
+
+
+class MockAttributeCollection(dict):
+    """Mirrors mesh.attributes -- name-addressable, `in`-checkable, raises
+    KeyError on a missing name, exactly like a plain dict already does.
+    `.new(name=, type=, domain=)` is the one bit of real-bpy-shaped
+    behavior on top of that."""
+
+    def __init__(self, size):
+        super().__init__()
+        self._size = size
+
+    def new(self, name, type, domain='POINT'):
+        attr = MockPointAttribute(name, type, self._size)
+        self[name] = attr
+        return attr
+
+
+class MockMesh:
+    """Mirrors bpy.types.Mesh, scoped to exactly what d3blender's
+    point-attribute machinery touches: `.vertices` (plain list of
+    MockVertex) and `.attributes` (named per-vertex data, see
+    MockAttributeCollection). `.update()` is a no-op -- there's no real
+    depsgraph here to notify."""
+
+    def __init__(self, vertices):
+        self.vertices = [MockVertex(co) for co in vertices]
+        self.attributes = MockAttributeCollection(len(self.vertices))
+
+    def update(self):
+        pass
+
+
 _OBJECT_REAL_ATTRS = {'name', 'type', 'parent', 'selected', 'hidden',
                        'modifiers', 'users_collection', '_props',
                        'location', 'scale', 'rotation_euler', '_keyframes',
-                       'active_material', 'material_slots'}
+                       'active_material', 'material_slots', 'data'}
 
 
 class MockObject:
@@ -161,6 +228,7 @@ class MockObject:
         self.location = (0.0, 0.0, 0.0)
         self.scale = (1.0, 1.0, 1.0)
         self.rotation_euler = (0.0, 0.0, 0.0)
+        self.data = None  # a MockMesh, for point_attr/set_point_attr -- see spawn_points()
 
     def __setattr__(self, key, value):
         if key not in _OBJECT_REAL_ATTRS:
@@ -218,4 +286,16 @@ def spawn(adapter, collection, name, type_='MESH', **props):
     collection.objects.append(obj)
     obj.users_collection = (collection,)
     adapter.objects.append(obj)
+    return obj
+
+
+def spawn_points(adapter, collection, name, vertices, **props):
+    """Like spawn(), but gives the object a MockMesh sized to `vertices`
+    (a list of (x, y, z) local-space coordinates) -- the one-object-with-
+    many-vertices analogue of spawn(), for point_attr/set_point_attr and
+    point_data() instead of one object per datum. Mirrors real bpy's
+    `mesh.from_pydata(vertices, [], [])` + `objects.new(name, mesh)`
+    shape closely enough to exercise the same adapter code either way."""
+    obj = spawn(adapter, collection, name, **props)
+    obj.data = MockMesh(vertices)
     return obj

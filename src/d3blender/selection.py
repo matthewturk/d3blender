@@ -6,11 +6,53 @@ only adds the object-oriented ergonomics and the join/reconciliation
 pattern, which has no existing-library equivalent.
 """
 
+import inspect
+
+
+def _arity(fn):
+    """Parameter count of `fn` -- lets accessor/each/filter callables be
+    written as `fn(el)`, `fn(el, i)`, or `fn(el, d, i)` and have the right
+    one picked automatically (see _invoke). Real d3's own accessors are
+    `(d, i) => ...`, receiving the bound datum directly, because a d3
+    selection keeps data bound to each DOM node permanently once joined.
+    d3blender mirrors that with a parallel Selection.datum list (see
+    Join.join() below) instead of attaching data to the element itself --
+    not every adapter's elements can hold arbitrary Python attributes
+    (a real bpy ID can't). Falls back to 2 -- the pre-existing `(el, i)`
+    shape -- for a callable inspect can't read (rare: some builtins),
+    so nothing regresses for those."""
+    try:
+        return len(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return 2
+
+
+def _invoke(fn, el, d, i):
+    """Call `fn` with however many positional args its own arity calls
+    for -- `fn(el)`, `fn(el, i)`, or `fn(el, d, i)`. The one place all
+    of Selection's callable-accepting methods (attr, each, keyframe,
+    filter) dispatch through, so all three call shapes work consistently
+    everywhere a callable is accepted."""
+    n = _arity(fn)
+    if n >= 3:
+        return fn(el, d, i)
+    if n == 2:
+        return fn(el, i)
+    return fn(el)
+
 
 class Selection:
-    def __init__(self, adapter, elements):
+    def __init__(self, adapter, elements, datum=None):
+        """`datum` is the bound-data counterpart to `.elements` -- one
+        entry per element, in the same order, or `None` for each element
+        if this selection has no bound data (e.g. a plain `select()`
+        query, not the result of `.data().join()`). Real d3 attaches
+        `__data__` to the node itself and never needs a parallel list;
+        d3blender can't do that generically (see _arity's docstring), so
+        it tracks the same information alongside `.elements` instead."""
         self.adapter = adapter
         self.elements = list(elements)
+        self.datum = list(datum) if datum is not None else [None] * len(self.elements)
 
     def __len__(self):
         return len(self.elements)
@@ -24,16 +66,49 @@ class Selection:
     # -- d3-style verbs -------------------------------------------------
 
     def each(self, fn):
-        for i, el in enumerate(self.elements):
-            fn(el, i)
+        for i, (el, d) in enumerate(zip(self.elements, self.datum)):
+            _invoke(fn, el, d, i)
         return self
 
     def attr(self, key, value=None):
         if value is None:
             return self.adapter.get_attr(self.elements[0], key) if self.elements else None
-        for i, el in enumerate(self.elements):
-            v = value(el, i) if callable(value) else value
+        for i, (el, d) in enumerate(zip(self.elements, self.datum)):
+            v = _invoke(value, el, d, i) if callable(value) else value
             self.adapter.set_attr(el, key, v)
+        return self
+
+    def classed(self, names, value=None):
+        """d3's `selection.classed(names[, value])` -- toggles one or
+        more classes in the space-separated `d3_class` custom property
+        that already powers `.foo`-style selectors (see `classes_of()`),
+        rather than replacing the whole string -- other classes already
+        on an element are preserved. `names` can be space-separated,
+        exactly like d3's own multi-class form (`.classed('enemy boss',
+        True)` adds both).
+
+        Getter (`value` is `None`): whether the *first* element has
+        *all* of `names` -- same "first element" convention as
+        `.attr()`'s getter, `False` for an empty selection.
+
+        Setter: `value` is a plain bool, applied to every element, or a
+        callable (`(el)`/`(el, i)`/`(el, d, i)`, same dispatch as
+        everywhere else) returning one per element. `True` adds the
+        class(es), `False` removes them."""
+        names = names.split()
+        if value is None:
+            if not self.elements:
+                return False
+            current = self.adapter.classes_of(self.elements[0])
+            return all(n in current for n in names)
+        for i, (el, d) in enumerate(zip(self.elements, self.datum)):
+            want = _invoke(value, el, d, i) if callable(value) else value
+            classes = self.adapter.classes_of(el)
+            if want:
+                classes.update(names)
+            else:
+                classes.difference_update(names)
+            self.adapter.set_attr(el, 'd3_class', ' '.join(sorted(classes)))
         return self
 
     def keyframe(self, frame, **attrs):
@@ -44,28 +119,44 @@ class Selection:
 
             sel.keyframe(1, location=start).keyframe(30, location=end)
         """
-        for i, el in enumerate(self.elements):
+        for i, (el, d) in enumerate(zip(self.elements, self.datum)):
             for key, value in attrs.items():
-                v = value(el, i) if callable(value) else value
+                v = _invoke(value, el, d, i) if callable(value) else value
                 self.adapter.set_attr(el, key, v)
                 self.adapter.keyframe_insert(el, key, frame)
         return self
 
     def filter(self, predicate):
+        kept, kept_data = [], []
         if callable(predicate):
-            kept = [el for el in self.elements if predicate(el)]
+            for i, (el, d) in enumerate(zip(self.elements, self.datum)):
+                if _invoke(predicate, el, d, i):
+                    kept.append(el)
+                    kept_data.append(d)
         else:
             from . import query
             matched_ids = {id(e) for e in query.select(self.adapter, predicate).elements}
-            kept = [el for el in self.elements if id(el) in matched_ids]
-        return Selection(self.adapter, kept)
+            for el, d in zip(self.elements, self.datum):
+                if id(el) in matched_ids:
+                    kept.append(el)
+                    kept_data.append(d)
+        return Selection(self.adapter, kept, datum=kept_data)
 
     def select(self, selector_str, axis='collection'):
         """Scoped descendant query: search within the current selection's
         subtree rather than the whole scene. `axis='collection'` walks
         containment (folders); `axis='parent'` walks transform parenting
         (rigs, instancing). Delegates the actual matching to query.select,
-        then intersects with the descendant set computed here."""
+        then intersects with the descendant set computed here.
+
+        Deliberately returns an *unbound* Selection (datum all `None`),
+        not this selection's own bound data carried down to whatever
+        descendants it finds -- unlike .filter() (a subset of the same
+        elements, so each survivor's datum obviously carries over), a
+        descendant here isn't the same thing .data() was ever bound to,
+        and there's no 1:1 parent-datum-to-child mapping to fall back on
+        (one parent can have many matching descendants). Rebind with a
+        fresh `.data()` if you need one."""
         universe, seen = [], set()
         if axis == 'collection':
             frontier = list(self.elements)
@@ -126,14 +217,39 @@ class Join:
         self.items = list(items)
         self.key_fn = key_fn or (lambda i, d: str(i))
 
-    def join(self, enter, update=None, exit=None):
+    def join(self, enter, update=None, exit=None, **create_kwargs):
+        """`enter` is normally a callable `d -> element`. It can also be
+        a shape name (a string, e.g. `'uv_sphere'`) -- d3's own
+        `selection.join("circle")` shorthand, which desugars to
+        `enter => enter.append("circle")` since the DOM has one
+        universal "create an element of this type" primitive. Blender's
+        object creation isn't remotely that uniform (a sphere and a
+        camera and an empty are built through entirely different APIs),
+        so this doesn't invent a generic creator -- it dispatches to
+        `self.adapter.creator(enter, **create_kwargs)`, a small, adapter-
+        owned registry of the handful of cases that genuinely are
+        unambiguous (see LiveBlenderAdapter.creator -- real bpy's own
+        primitive-mesh operators, real bpy only, no mock equivalent,
+        same split as everywhere else creation-related in this library).
+        `create_kwargs` only makes sense alongside the string form --
+        passing it with a callable `enter` is almost certainly a
+        mistake, so it's a hard error, not silently ignored."""
+        if isinstance(enter, str):
+            enter = self.adapter.creator(enter, **create_kwargs)
+        elif create_kwargs:
+            raise TypeError(
+                f"join() got creator kwargs ({sorted(create_kwargs)}) but 'enter' "
+                "is a callable, not a shape name string -- those only apply "
+                "to the enter='shape_name' form"
+            )
+
         existing = {}
         for el in self.selection.elements:
             k = self.adapter.get_attr(el, self.KEY_PROP)
             if k is not None:
                 existing[k] = el
 
-        result = []
+        result, result_data = [], []
         used_keys = set()
         for i, d in enumerate(self.items):
             k = self.key_fn(i, d)
@@ -145,6 +261,7 @@ class Join:
             elif update is not None:
                 update(el, d)
             result.append(el)
+            result_data.append(d)  # this element's bound datum -- see Selection.datum
 
         for k, el in existing.items():
             if k not in used_keys:
@@ -153,4 +270,4 @@ class Join:
                 else:
                     self.adapter.remove(el)
 
-        return Selection(self.adapter, result)
+        return Selection(self.adapter, result, datum=result_data)

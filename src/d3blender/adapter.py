@@ -12,6 +12,56 @@ Two axes, matching Blender's two real hierarchies:
 
 _MISSING = object()
 
+# Mesh point-domain (per-vertex) attribute shapes -- verified against real
+# bpy 5.2 (see tests/blender/test_point_attrs.py): a POINT-domain attribute's
+# value lives under a type-dependent field name, same "duck-typed shape
+# lookup" pattern as the GN input value holder above (_gn_input_get).
+# Position itself is deliberately NOT routed through this table -- it's
+# handled separately via mesh.vertices[i].co, the always-present, always-
+# stable API, rather than relying on the newer unified-attributes view of
+# position (confirmed equivalent, but younger and less universally assumed).
+_POINT_ATTR_SHAPE = {
+    'FLOAT': (1, 'value'),
+    'INT': (1, 'value'),
+    'BOOLEAN': (1, 'value'),
+    'FLOAT_VECTOR': (3, 'vector'),
+    'FLOAT_COLOR': (4, 'color'),
+}
+
+
+def _infer_point_attr_type(value):
+    """Pick a mesh.attributes.new(type=...) value from a sample Python
+    value, for set_point_attr()'s create-on-first-write path. bool before
+    int matters -- bool is an int subclass in Python."""
+    if isinstance(value, bool):
+        return 'BOOLEAN'
+    if isinstance(value, int):
+        return 'INT'
+    if isinstance(value, float):
+        return 'FLOAT'
+    if isinstance(value, (tuple, list)):
+        if len(value) == 3:
+            return 'FLOAT_VECTOR'
+        if len(value) == 4:
+            return 'FLOAT_COLOR'
+    raise TypeError(
+        f"can't infer a point-attribute type for {value!r} -- expected a "
+        "float, int, bool, or a 3- or 4-tuple (vector/color)")
+
+
+def _check_point_count(adapter, el, name, n, values):
+    """Shared by SceneAdapter.set_point_attr and LiveBlenderAdapter's bulk
+    override -- set_point_attr never resizes a mesh to fit (see CLAUDE.md),
+    so a length mismatch is always a clear error, not an implicit rebuild,
+    on both code paths identically."""
+    if len(values) != n:
+        raise ValueError(
+            f"set_point_attr({name!r}): got {len(values)} values for "
+            f"{n} points on {adapter.name_of(el)!r} -- set_point_attr "
+            "never resizes the mesh; rebuild it explicitly first if "
+            "the point count actually changed"
+        )
+
 
 class _Collection:
     """Minimal duck-typed collection -- name/objects/children plus the
@@ -257,6 +307,69 @@ class SceneAdapter:
                 result[name] = None
         return result
 
+    # -- per-vertex ("point") data ---------------------------------------
+    #
+    # A different granularity than get_attr/set_attr above: those read/write
+    # one property on one object; these read/write one value *per vertex*,
+    # for the case where the data you're visualizing has too many points to
+    # sensibly be one object each (see CLAUDE.md). Generic, duck-typed
+    # per-item loop here so it's correct against both the mock and real bpy
+    # with no bpy import; LiveBlenderAdapter overrides both with a bulk
+    # foreach_get/foreach_set version, since that loop is ~100x slower than
+    # bulk access on real meshes at any real point count (measured against
+    # tests/blender/) -- the whole reason to reach for vertices over objects
+    # is scale, so the naive version would quietly defeat its own purpose
+    # there. Correctness lives here either way; LiveBlenderAdapter's override
+    # is purely a performance override, never a behavior difference.
+
+    def point_count(self, el):
+        """Number of vertices on `el`'s mesh -- 0 if `el` isn't a mesh
+        object at all."""
+        vertices = getattr(getattr(el, 'data', None), 'vertices', None)
+        return len(vertices) if vertices is not None else 0
+
+    def point_attr(self, el, name):
+        """The whole per-vertex array for point-domain attribute `name`,
+        one entry per vertex, in vertex-index order. `name='position'` is
+        `.co`; anything else is a named entry in `mesh.attributes` (create
+        it first via set_point_attr -- reading an attribute that doesn't
+        exist is a KeyError, same as reading a dict key that isn't there)."""
+        mesh = el.data
+        if name == 'position':
+            return [tuple(v.co) for v in mesh.vertices]
+        attr = mesh.attributes[name]
+        arity, field = _POINT_ATTR_SHAPE[attr.data_type]
+        if arity == 1:
+            return [getattr(item, field) for item in attr.data]
+        return [tuple(getattr(item, field)) for item in attr.data]
+
+    def set_point_attr(self, el, name, values):
+        """Write a whole per-vertex array in one call -- `values` must have
+        exactly as many entries as `el` has vertices. Deliberately never
+        resizes the mesh to fit: a length mismatch is a clear error, not an
+        implicit rebuild (see CLAUDE.md) -- rebuild the mesh yourself first
+        if the point count genuinely changed. Creates the attribute (typed
+        by inference from `values[0]`, see _infer_point_attr_type) the
+        first time you write a new name; after that, the existing type
+        sticks, same as a modifier property would."""
+        mesh = el.data
+        values = list(values)
+        _check_point_count(self, el, name, self.point_count(el), values)
+        if name == 'position':
+            for vertex, co in zip(mesh.vertices, values):
+                vertex.co = co
+            mesh.update()
+            return
+        if name in mesh.attributes:
+            attr = mesh.attributes[name]
+        else:
+            attr = mesh.attributes.new(
+                name=name, type=_infer_point_attr_type(values[0]), domain='POINT')
+        arity, field = _POINT_ATTR_SHAPE[attr.data_type]
+        for item, value in zip(attr.data, values):
+            setattr(item, field, value)
+        mesh.update()
+
     def keyframe_insert(self, el, data_path, frame):
         el.keyframe_insert(data_path=data_path, frame=frame)
 
@@ -291,6 +404,26 @@ class SceneAdapter:
 
     def objects_without_collection(self):
         return [o for o in self.objects if not getattr(o, 'users_collection', None)]
+
+    def creator(self, name, collection, **create_kwargs):
+        """Resolve a shape name (e.g. `'uv_sphere'`) to an `enter`
+        callable for `Join.join()`'s string shorthand -- see its
+        docstring. The base/mock adapter can't fulfill this at all:
+        there's no bpy.ops equivalent here to dispatch to, and this
+        deliberately doesn't grow a hand-rolled geometry generator to
+        fake one (see CLAUDE.md's "no primitive-mesh functions"
+        discussion -- reinventing what Blender's own primitive
+        operators already do well is exactly the trap this library has
+        avoided elsewhere). `LiveBlenderAdapter.creator()` is the real
+        implementation; against the mock, build your own starting shape
+        with `mock.spawn()`/`spawn_points()` and pass a plain callable
+        `enter` instead."""
+        raise NotImplementedError(
+            f"creator({name!r}) needs a real Blender adapter (LiveBlenderAdapter) -- "
+            "the mock has no bpy.ops equivalent for building primitive geometry. "
+            "Use mock.spawn()/spawn_points() with your own vertex data and pass a "
+            "plain callable as join()'s enter= instead."
+        )
 
     def get_or_create_collection(self, name, parent=None):
         """Get-or-create a collection by name -- the Blender equivalent of

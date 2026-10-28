@@ -21,6 +21,11 @@ This has been run against real bpy (PyPI's headless module -- see
 tests/blender/), not yet against the full Blender application; if
 something here doesn't match your Blender version, that's expected --
 see CLAUDE.md's "Testing status" section.
+
+The attribute-setting below is one continuous chain off .join() --
+.attr(key, fn) accessors receive (el, d, i), the bound datum included,
+matching real d3's own `.attr("x", d => ...)` idiom (see
+Selection.datum in selection.py).
 """
 
 import bpy
@@ -58,15 +63,14 @@ def spawn_cube(name):
     return obj
 
 
-bars = (select(adapter, '#Chart mesh')
-        .data(data, key=lambda i, d: d['label'])
-        .join(enter=lambda d: spawn_cube(f"bar_{d['label']}")))
-
-for el, d in zip(bars.elements, data):
-    h = height(d['revenue'])
-    el.location = (x(d['label']), 0, h / 2)          # sits on the ground, grows up
-    el.scale = (x.bandwidth() / 2, 0.5, h / 2)        # cube default is 2x2x2, halve for unit scale
-    el['revenue'] = d['revenue']
-    el['fill'] = color(d['label'])
+bars = (
+    select(adapter, '#Chart mesh')
+    .data(data, key=lambda i, d: d['label'])
+    .join(enter=lambda d: spawn_cube(f"bar_{d['label']}"))
+    .attr('location', lambda el, d, i: (x(d['label']), 0, height(d['revenue']) / 2))
+    .attr('scale', lambda el, d, i: (x.bandwidth() / 2, 0.5, height(d['revenue']) / 2))
+    .attr('revenue', lambda el, d, i: d['revenue'])
+    .attr('fill', lambda el, d, i: color(d['label']))
+)
 
 bars.each(lambda el, i: print(f"{el.name}: loc={el.location} scale={el.scale} fill={el['fill']}"))

@@ -17,9 +17,19 @@ def clean_scene():
     each test so state never leaks between cases (before: in case a
     previous test crashed mid-test and skipped its own cleanup; after:
     so the next test, or a REPL poking at the same process, starts
-    clean)."""
+    clean).
+
+    `bpy.app.handlers` is separate from `bpy.data` and read_factory_settings
+    doesn't touch it -- a test using live_point_data() that raises before
+    its own `finally: stop()` would otherwise leave a handler registered
+    whose closure references objects the next reset just deleted, which
+    would then blow up the *next* test's frame_set() instead of this
+    one's. Clear it explicitly as a backstop, on top of each test calling
+    stop() itself."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.app.handlers.frame_change_pre.clear()
     yield
+    bpy.app.handlers.frame_change_pre.clear()
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
 

@@ -12,7 +12,14 @@ see d3blender.blender_adapter.get_adapter().
 from .adapter import SceneAdapter
 from .query import select, compile_query
 from .selection import Selection, Join
-from .scale import scale_linear, scale_band, scale_ordinal
+from .scale import (
+    scale_linear,
+    scale_band,
+    scale_ordinal,
+    scale_time,
+    scale_sequential,
+    interpolate_rgb,
+)
 
 __all__ = [
     "SceneAdapter",
@@ -23,6 +30,9 @@ __all__ = [
     "scale_linear",
     "scale_band",
     "scale_ordinal",
+    "scale_time",
+    "scale_sequential",
+    "interpolate_rgb",
 ]
 
 __version__ = "0.1.0"

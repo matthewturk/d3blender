@@ -129,21 +129,50 @@ like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
 `.` as a class.
 
 ### `Selection`
-- `.each(fn)` -- calls `fn(el, i)` for every element, returns `self`
+
+Every callable a `Selection` method accepts -- `.attr()`'s `value`,
+`.each()`'s `fn`, `.keyframe()`'s attr values, `.filter()`'s
+`predicate` -- can be written as `fn(el)`, `fn(el, i)`, or
+`fn(el, d, i)`, and the right one is picked automatically by the
+callable's own arity. `d` is this element's own bound datum -- the same
+thing real d3's `(d, i) => ...` accessors receive directly, because a
+d3 selection keeps data bound to its DOM nodes permanently once joined.
+d3blender mirrors that with `Selection.datum`, a list parallel to
+`.elements` that `Join.join()` populates (one entry per element, in
+data order) -- not every adapter's elements can hold arbitrary Python
+attributes the way a DOM node can, so it's tracked alongside the
+elements rather than on them. A `Selection` with no bound data (a plain
+`select()` query, or `.select()`'s scoped descendant results -- see
+below) has `.datum` full of `None`s; a 3-arg callable against one just
+gets `d=None`, no error.
+
+- `.each(fn)` -- calls `fn` for every element, returns `self`
 - `.attr(key, value=None)` -- getter if `value` is `None` (reads the first
-  element), setter otherwise; `value` can be a plain value or `fn(el, i)`.
+  element), setter otherwise; `value` can be a plain value or a callable.
   `key` reaches into nested properties (modifiers, geometry nodes inputs --
   see below) as either a dot-joined string (`'modifiers.Bevel.width'`) or
   a tuple of segments (`('modifiers', 'Scatter.001', 'Size')`); use the
   tuple form whenever a name in the chain might itself contain a `.`
   (Blender auto-suffixes duplicate modifiers/node groups the same way it
   does object names)
+- `.classed(names, value=None)` -- d3's `selection.classed()`: toggles
+  one or more classes (space-separated, like `'enemy boss'`) in the
+  `d3_class` custom property that `.foo`-style selectors already read,
+  without disturbing other classes already on the element. Getter
+  (`value=None`) reads whether the *first* element has *all* of
+  `names`; setter takes a plain bool or a callable, same shapes as
+  `.attr()`
 - `.keyframe(frame, **attrs)` -- sets each attr and drops a real Blender
   keyframe at `frame`. Blender's own F-curves do the interpolation, so
   this is the whole "transition" story: `sel.keyframe(1, location=a).keyframe(30, location=b)`
-- `.filter(predicate)` -- `predicate` can be a selector string or `fn(el) -> bool`
+- `.filter(predicate)` -- a selector string, or a callable as above;
+  survivors keep their own bound datum (`kept.datum` lines up with
+  `kept.elements`)
 - `.select(selector_str, axis='collection'|'parent')` -- scoped descendant
-  query within the current selection's subtree
+  query within the current selection's subtree. Returns an *unbound*
+  Selection -- there's no 1:1 parent-datum-to-child mapping to fall back
+  on (one element can have many matching descendants), so this doesn't
+  try to guess one; rebind with a fresh `.data()` if you need one
 - `.remove()` -- removes every element in the selection
 - `.data(items, key=None) -> Join`
 
@@ -151,7 +180,34 @@ like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
 - `.join(enter, update=None, exit=None) -> Selection` -- reconciles by
   identity (a stamped `d3_key` custom property). `enter(d)` must return
   the created element; `update(el, d)` and `exit(el)` are optional (a
-  missing `exit` just calls `adapter.remove(el)`).
+  missing `exit` just calls `adapter.remove(el)`). The returned
+  `Selection`'s `.datum` is each element's own item from `items`, in the
+  same order -- rerunning `.data(newItems).join(...)` rebinds it to the
+  new items, not stale ones.
+- `enter` can also be a shape name string (e.g. `.join('uv_sphere',
+  collection=chart)`) -- real d3's own `selection.join("circle")`
+  shorthand, dispatched through `adapter.creator(name, collection,
+  **create_kwargs)`. `collection` is required (there's no DOM-like
+  implicit parent to default to, and defaulting to Blender's ambient
+  "active collection" risks landing objects somewhere invisible to
+  `select()` -- see Known limitations); other kwargs are creation-time
+  parameters (radius, segments, ring_count, ...), each a plain value or
+  a per-datum `fn(d) -> value`. Real bpy only (`LiveBlenderAdapter`) --
+  the mock's `creator()` raises clearly, since there's no `bpy.ops`
+  equivalent to dispatch to; build your own base shape with
+  `mock.spawn()`/`spawn_points()` and pass a plain callable `enter`
+  instead. Available names: `uv_sphere`, `ico_sphere`, `cube`,
+  `cylinder`, `cone`, `plane`, `torus`, `circle` -- the standard bpy.ops
+  mesh primitives, not a d3blender-invented geometry generator. **Shape
+  parameters only exist at creation time** -- unlike an SVG circle's
+  `r`, a UV sphere's `segments`/`ring_count`/`radius` are baked into the
+  mesh's vertex data, not settable object properties afterward
+  (confirmed: `obj['segments'] = 32` on an already-created sphere
+  changes nothing). Everything genuinely mutable -- name, location,
+  scale, custom props -- is still an ordinary `.attr()` call after the
+  join, same as always; `.attr('scale', lambda el, d, i: (d['radius'],) * 3)`
+  is the right way to vary a primitive's *apparent* size per datum
+  without needing a creation-time parameter at all.
 
 ### Modifiers and Geometry Nodes inputs
 `adapter.get_attr`/`.set_attr` (and therefore `Selection.attr`) walk
@@ -194,10 +250,291 @@ select(adapter, '#Chart mesh').attr(('modifiers', 'Scatter', 'Size'), 2.0)
   selected/filtered on that way. Use `.filter(lambda el: adapter.get_attr(el, (...)) > x)`
   instead of `[modifiers.Scatter.Instance Count>2]` (which doesn't parse).
 
+### Material shader inputs
+
+No new API here -- `get_attr`/`set_attr`'s existing generic path-walker
+already reaches straight into a material's shader node tree, confirmed
+against real bpy with zero changes needed:
+
+```python
+select(adapter, '#Ball').attr(
+    ('active_material', 'node_tree', 'nodes', 'Principled BSDF', 'inputs', 'IOR', 'default_value'),
+    lambda el, d, i: d['ior'])
+```
+
+`active_material` -> `node_tree` -> `nodes` -> the node's name ->
+`inputs` -> the socket's name -> `default_value` -- plain attribute/
+subscript access the whole way, the same walk that already worked for
+`modifiers.Bevel.width` before any GN-specific handling existed. See
+`examples/material_shader_params_blender.py` for a full data-driven
+example (IOR, Roughness, Base Color, one material per object).
+
+Two real gotchas, both confirmed, not assumed:
+
+- **Node names auto-suffix exactly like objects and modifiers** -- a
+  second `Principled BSDF` node in the same tree becomes `Principled
+  BSDF.001`. The same tuple-vs-dotted-string rule applies: use a tuple
+  segment for the node's name whenever it might not be unique, for the
+  same reason `('modifiers', 'Scatter.001', 'Size')` exists.
+- **Setting `default_value` on an already-linked socket succeeds
+  silently and changes nothing visually.** If a texture (or any other
+  node) feeds a socket, that link overrides its own `default_value`
+  entirely -- `set_attr` doesn't know or warn, the value just sits there
+  unused. If a `.attr()` write to a shader input doesn't seem to do
+  anything, check `socket.is_linked` first.
+
+Exact socket names (`'IOR'`, `'Base Color'`, `'Transmission Weight'`, ...)
+are whatever your Blender version's Principled BSDF actually calls them
+-- they do change between versions (confirmed: the `Specular` input
+became `Specular IOR Level` around Blender 4.0). Inspect
+`material.node_tree.nodes['Principled BSDF'].inputs` directly if
+something doesn't resolve.
+
+**A material you didn't build -- an asset, something with its real
+shader buried a few node groups deep -- is a worse fit for path-walking**
+than one whose structure you actually know: you'd be hardcoding a path
+through node names you don't control and don't want to. Blender's own
+driver system is the better tool there: wire a driver, once, from
+whatever deeply-nested socket needs exposing to a plain custom object
+property, and every future update only ever touches that property --
+`.attr()` reaches it exactly like any other custom prop, no knowledge
+of the material's structure required after the one-time setup.
+
+```python
+driver = bsdf.inputs['IOR'].driver_add('default_value').driver
+driver.type = 'AVERAGE'   # a single-variable average = a clean passthrough
+var = driver.variables.new()
+var.name = 'ior_value'
+var.type = 'SINGLE_PROP'
+var.targets[0].id_type = 'OBJECT'
+var.targets[0].id = obj
+var.targets[0].data_path = '["ior_value"]'
+```
+
+...after which `select(adapter, '#Ball').attr('ior_value', lambda el, d, i: d['ior'])`
+is the entire story, forever -- no path into the material anywhere in
+that call. Use `driver.type = 'AVERAGE'`, not `'SCRIPTED'`: a
+single-variable average is a clean passthrough, and unlike `'SCRIPTED'`
+(an arbitrary Python expression string), it doesn't require Blender's
+"Auto Run Python Scripts" preference to be enabled -- `'SCRIPTED'`
+drivers are silently disabled without it.
+
+**Confirmed, and easy to get wrong: changing the driving custom
+property doesn't propagate to the driven value on its own, in headless
+scripting.** The *first* change after a driver is created shows up with
+just `bpy.context.view_layer.update()` -- every change after that
+first one silently doesn't, `view_layer.update()` alone or not
+(confirmed across several consecutive changes). `el.update_tag()`
+immediately before `view_layer.update()`, on *every* change, is what
+actually fixes it -- the same two-call pattern the Geometry Nodes
+segment-count case needed, just easier to miss here since the first
+change alone looking right could pass for "it works." See
+`examples/material_shader_params_driven_blender.py` for the full
+worked example (four spheres, one asset-style material each, IOR/
+Roughness driven purely through custom properties).
+
+### Cameras
+
+Also no new API -- a camera is just an ordinary object. `select(adapter,
+'camera')` finds it the same way `'mesh'` finds meshes; its transform
+(`location`, `rotation_euler`) is an ordinary `.attr()` target. Camera-
+specific properties (focal length, clipping, depth of field) live on
+`.data`, one path-walk deeper, confirmed against real bpy with zero
+adapter changes:
+
+```python
+select(adapter, 'camera').attr(('data', 'lens'), lambda el, d, i: d['focal_length'])
+select(adapter, 'camera').attr(('data', 'dof', 'focus_distance'), lambda el, d, i: d['focus'])
+```
+
+If `select(adapter, 'camera')` comes back empty even though the camera
+exists, it's almost certainly the scene-root-collection gotcha (see
+Known limitations) -- link it into a real collection, not just
+`bpy.context.scene.collection`.
+
+### Compositor nodes
+
+A third node-tree domain, after Geometry Nodes and materials, reachable
+the same generic way -- confirmed against real bpy. **The exact API
+here is version-sensitive and changed recently**: this Blender version
+stores the compositor as a real node-group datablock on
+`scene.compositing_node_group`, not the older `scene.node_tree`, and
+`use_nodes = True` doesn't create that node group for you the way it
+does for a material -- you create and assign it yourself:
+
+```python
+group = bpy.data.node_groups.new('Compositing', 'CompositorNodeTree')
+scene.compositing_node_group = group
+scene.use_nodes = True
+```
+
+...after which a node's inputs resolve exactly like a material's:
+
+```python
+adapter.set_attr(scene, ('compositing_node_group', 'nodes', 'Glare', 'inputs', 'Threshold', 'default_value'), 0.5)
+```
+
+Some node parameters are plain `bpy_struct` properties instead of
+sockets (varies per node, same as everywhere else in this project) --
+inspect the node directly (`node.bl_rna.properties`, `node.inputs`) if
+a name doesn't resolve, same advice as the Modifiers and Material
+sections above. `scene` here isn't something you reach through
+`select()` -- there's normally exactly one, so just use
+`bpy.context.scene` directly, the same way `select(adapter, el)`
+already handles "I already have the element" for anything else.
+
+### Per-vertex ("point") data
+
+A different granularity than everything above: `get_attr`/`set_attr`
+read/write one property on one object; these read/write one value *per
+vertex*, for when your data has too many points to sensibly be one
+object each (thousands of objects bogs down Blender's outliner/viewport
+long before thousands of vertices in one mesh do).
+
+- `adapter.point_count(el) -> int` -- vertex count, 0 if `el` isn't a mesh.
+- `adapter.point_attr(el, name) -> [value, ...]` -- the whole per-vertex
+  array for one named channel, in vertex-index order. `name='position'`
+  is `.co`; anything else is a named entry in `mesh.attributes`
+  (Blender's unified point/edge/face/corner attribute system). Reading a
+  name that doesn't exist yet is a `KeyError`, same as a missing dict key.
+- `adapter.set_point_attr(el, name, values)` -- bulk write; `len(values)`
+  must equal `point_count(el)` exactly. **Deliberately never resizes the
+  mesh to fit** -- a length mismatch is a clear `ValueError`, not an
+  implicit rebuild. If the point count genuinely changed, rebuild the
+  mesh yourself first (`mesh.clear_geometry()` + `mesh.from_pydata()`
+  is the real-bpy way -- confirmed to work cleanly, but it does wipe any
+  existing custom attributes, which then need recreating). Writing a new
+  name creates the attribute, typed by inspecting your first value
+  (float/int/bool/3-tuple/4-tuple -> FLOAT/INT/BOOLEAN/FLOAT_VECTOR/
+  FLOAT_COLOR); writing an existing name keeps its established type.
+- `points.point_data(adapter, el, frame, **channels)` -- the d3-flavored
+  layer on top: each keyword is a channel name mapped to a
+  `fn(frame) -> values` callable, computed and bulk-written in one call.
+  Not flattened into the top-level package (same convention as `axis`/
+  `array`) -- `from d3blender.points import point_data`.
+
+**`point_data()` is deliberately not shaped like `Join`.** `Join` needs a
+stamped identity (`d3_key`) because objects can be individually added or
+removed and a rerun has to recognize "this object still represents the
+same thing." Vertices don't have that kind of identity -- `point_data()`
+binds by *index* (`data[i]` -> vertex `i`), not by key, and there's no
+enter/update/exit. If you need per-entity continuity across a changing
+dataset, that's what object-based `Selection`/`Join` is for; `point_data`
+trades identity for the scale vertices give you over one object per point.
+
+**No keyframing, no interpolation, no state kept between calls** -- every
+`point_data()` call recomputes and overwrites each channel from scratch.
+That's a real constraint, not a missing feature: per-vertex position
+*can* be F-curve-keyframed like `obj.location` can, but the cost scales
+with vertex count (measured: 2000 vertices creates 6000 F-curves for a
+single keyframe pass) -- fine for a few hundred points, real file bloat
+past that. Per-vertex custom attributes can't be keyframed through bpy's
+RNA system at all (`keyframe_insert()` raises `could not make path`). So
+"changing over time" here means recomputing per frame, one of two ways:
+
+- **An explicit loop** -- `for frame in range(...): point_data(...)`.
+  Deterministic and fully mock-testable, but be aware of what it
+  actually does: it computes every frame's values instantly, one after
+  another, and only the *last* one survives (nothing is stored) -- so
+  this is for baking/exporting frame-by-frame, not for "run once and
+  press Play," which does nothing afterward (confirmed: the mesh just
+  sits frozen at the loop's final frame, however you scrub).
+- **`blender_adapter.live_point_data(adapter, el, **channels)`** -- wires
+  the same channel functions to `bpy.app.handlers.frame_change_pre`
+  instead, so scrubbing or playing Blender's own timeline recomputes and
+  rewrites the mesh live. Applies once immediately at the current frame,
+  then again on every frame change; returns a `stop()` to remove the
+  binding. Safe to call again for the same object while iterating on a
+  script -- it replaces the previous handler rather than stacking a
+  duplicate (confirmed: rebinding doesn't increase the handler count).
+  Real-bpy only, since `bpy.app.handlers` doesn't exist without it -- see
+  `examples/nested_point_deformation_blender.py`/
+  `nested_uv_sphere_deformation_blender.py`, both updated to use this
+  instead of a bake loop specifically so pressing Play actually animates
+  them. Confirmed the handler fires correctly and cheaply on
+  `scene.frame_set()`, repeatedly, headless; real interactive
+  Play/scrubbing in a windowed session is a related but distinct claim,
+  not separately verified (see CLAUDE.md's Testing status section).
+
+If a channel needs continuity across calls either way -- easing between
+explicit states, a lookup table -- give its function that state via a
+closure; `point_data()` never manages it for you.
+
+**Position is always local to the object, never world space** -- a
+vertex's `.co` is relative to its own object's origin; Blender adds the
+object's `.location`/rotation/scale on top when it works out where that
+vertex ends up in the world. So an object's position (`Selection`/`Join`,
+per-object) and its mesh's shape (`point_data`, per-vertex) are
+independent and compose for free -- moving an object doesn't touch its
+vertices, and reshaping its vertices doesn't touch its `.location`. If
+you need a vertex's position expressed in *world* terms (a target
+computed in world space that you need to convert to what to write into
+`.co`), that conversion is on you -- subtract the object's own
+`.location` yourself first; `point_attr`/`point_data` never do it for
+you. See `examples/nested_point_deformation.py` for a worked example
+contrasting two deformation styles (relative to a captured base shape,
+vs. computed from scratch with no base shape at all) across several
+objects, each with its own per-instance parameters.
+
+**d3blender doesn't build primitive mesh geometry itself, on purpose --
+same "object creation is left to the caller" boundary as everywhere
+else here.** Blender's own `bpy.ops.mesh.primitive_uv_sphere_add()` (and
+cube/cylinder/cone/torus) already produce correct topology (poles, quad
+rings, real edges/faces); reinventing that in pure Python would be the
+same "reinventing X badly" trap the hand-rolled CSS matcher was already
+ripped out for. `point_attr`/`point_data` don't care how a mesh was
+built, though -- they drive a real UV sphere's vertices exactly the same
+way they'd drive a bare point cloud. See
+`examples/nested_uv_sphere_deformation_blender.py` (real bpy only, no
+mock sibling -- `bpy.ops` isn't something the mock has) for the same
+two-sphere demo built on real primitives instead, including why a
+*connected* mesh's "computed from scratch, no base shape" deformation
+style needs to be anchored to each vertex's own rest position rather
+than fully independent per vertex, to avoid tearing the surface --
+d3blender doesn't help you build or maintain edges, so a deformation
+formula that ignores the topology you started with will fight it.
+
+`d3blender.mock.spawn_points(adapter, collection, name, vertices, **props)`
+is the point-based sibling of `spawn()` -- gives the object a mesh sized
+to `vertices` up front, instead of the default Blender primitive shape.
+
 ### `scale.py`
 - `scale_linear(domain, range_)` -- `.invert(y)` also available
 - `scale_band(domain_items, range_, padding=0.1)` -- `.bandwidth()`, `.step`
 - `scale_ordinal(domain_items, range_)` -- cycles if there are more items than range values
+- `scale_time(domain, range_)` -- `scale_linear` with a `datetime.datetime`/
+  `datetime.date` domain instead of plain numbers; `.invert(y)` returns a
+  `datetime`, a real inverse of what `scale()` accepts. Naive datetimes
+  are treated as local time (Python's own `datetime.timestamp()`
+  behavior) -- fine for "which day is this," not guaranteed correct
+  across mixed timezones.
+- `scale_sequential(domain, interpolator)` -- maps a continuous domain
+  through `interpolator(t)` for `t` in `[0, 1]`, instead of onto a fixed
+  range; `interpolator` is any `t -> value` callable. Clamps `t` to
+  `[0, 1]` before calling `interpolator` -- unlike real d3, which only
+  clamps if you opt in with `.clamp(true)` -- since an interpolator
+  built for exactly `[0, 1]` will typically misbehave (values outside
+  0-1) for out-of-domain input otherwise.
+- `interpolate_rgb(start, end)` -- linear interpolation between two
+  color tuples (3-channel RGB or 4-channel RGBA), for use as
+  `scale_sequential()`'s interpolator -- the common "continuous color
+  scale" case:
+  ```python
+  color = scale_sequential((0, max_revenue), interpolator=interpolate_rgb((0.9, 0.9, 0.9, 1), (0.9, 0.1, 0.1, 1)))
+  bars.attr('fill', lambda el, d, i: color(d['revenue']))
+  ```
+
+### `shape.py` (mirrors pieces of d3-shape)
+- `line(points, closed=False) -> [(p0, p1), ...]` -- one segment per
+  consecutive pair of points, ready for `adapter.create_line_mesh(collection,
+  name, segments)`. This is d3.line()'s actual job -- turning a
+  data-derived array of points into a connected path -- not "generate a
+  primitive shape" (which this project deliberately doesn't do, see
+  "d3blender doesn't build primitive mesh geometry itself" above); the
+  points already come from your own data or formula, this only decides
+  which ones connect to which. `closed=True` also connects the last
+  point back to the first (d3's `curveLinearClosed`), for an outline/
+  polygon instead of an open path.
 
 ### `d3blender.array` (mirrors pieces of d3-array)
 Not flattened into the top-level package -- `max`/`min`/`bin` collide with
@@ -245,13 +582,19 @@ segment per tick value.
     modifier's inputs. See "Modifiers and Geometry Nodes inputs" above.
 - `d3blender.blender_adapter.get_adapter()` -- the one you actually call
   inside Blender; the only place in this package that imports `bpy`
+  - `d3blender.blender_adapter.live_point_data(adapter, el, **channels)`
+    -- wires `points.point_data()` to `bpy.app.handlers.frame_change_pre`
+    for live scrub/Play-driven updates. See "Per-vertex data" above.
 - `d3blender.mock` -- `MockObject` / `MockCollection` / `MockModifier` /
   `MockModifierCollection` / `MockMaterial` / `MockMaterialSlot` /
-  `MockNodeGroup` / `MockNodeGroupInterface` / `MockNodeGroupInterfaceItem`,
-  a fake scene shaped like `bpy.data` for testing without Blender
-  installed; `new_scene(name)` builds an adapter with one collection, and
-  `spawn(adapter, collection, name, type_='MESH', **props)` creates and
-  links an object into it -- the demo-scaffolding every example needs
+  `MockNodeGroup` / `MockNodeGroupInterface` / `MockNodeGroupInterfaceItem` /
+  `MockMesh` / `MockAttributeCollection` / `MockPointAttribute` /
+  `MockPointAttributeItem` / `MockVertex`, a fake scene shaped like
+  `bpy.data` for testing without Blender installed; `new_scene(name)`
+  builds an adapter with one collection, `spawn(adapter, collection,
+  name, type_='MESH', **props)` creates and links an object into it, and
+  `spawn_points(adapter, collection, name, vertices, **props)` is the
+  point-based sibling -- the demo-scaffolding every example needs
 
 ## Using it inside Blender
 
@@ -352,6 +695,18 @@ via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
   `adapter.collections` from. Doesn't affect idiomatic usage, since
   `get_or_create_collection()` always produces a real tracked collection;
   see CLAUDE.md's Testing status section for the full explanation.
+- `point_data()`/`set_point_attr()` never resize a mesh and never track
+  per-vertex identity -- a changing point count is always your job to
+  handle (rebuild the mesh explicitly), and there's no enter/update/exit
+  at the vertex level the way `Join` has at the object level.
+  `live_point_data()` (real bpy only) does wire up live scrub/Play-driven
+  updates, though -- see the "Per-vertex data" section above.
+- `Join.join()`'s shape-name shorthand covers the standard `bpy.ops.mesh`
+  primitives only (`uv_sphere`, `ico_sphere`, `cube`, `cylinder`, `cone`,
+  `plane`, `torus`, `circle`) -- nothing that needs a light/camera/GN
+  setup/databpy or nodebpy object, and no auto-inferred target
+  collection (see "Join" above for why). Pass your own `enter=...`
+  callable for anything else, same as before this existed.
 
 ## Project layout
 
@@ -363,9 +718,11 @@ src/d3blender/
     scene_doc.py          builds the two synthetic BeautifulSoup docs
     query.py              selector compiler + soupsieve delegation
     selection.py           Selection / Join
-    scale.py                scale_linear / scale_band / scale_ordinal
-    array.py                 bin / extent / max / min (mirrors d3-array)
-    axis.py                   ticks / tick_lines (line-segment tick marks)
+    scale.py                scale_linear / scale_band / scale_ordinal / scale_time / scale_sequential
+    shape.py                 line() -- connect points into a path (mirrors d3-shape)
+    array.py                  bin / extent / max / min (mirrors d3-array)
+    axis.py                    ticks / tick_lines (line-segment tick marks)
+    points.py                   point_data() -- data bound to mesh vertices
     mock.py                    fake bpy-shaped scene for testing
 examples/                runnable, mirror the README snippets
 tests/                    pytest suite (uses mock.py, no Blender required)
