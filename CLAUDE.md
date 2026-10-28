@@ -42,7 +42,8 @@ the things CSS can't express (numeric comparison, custom pseudo-classes)
 and get applied as a plain Python filter on the results afterward.
 `selection.py` wraps results in `Selection`/`Join` for the d3-shaped verbs
 (`.attr()`, `.each()`, `.filter()`, `.select()`, `.data().join()`,
-`.keyframe()`). `adapter.py` is the only thing that knows how to read a
+`.keyframe()`, `.transition()`). `fetch.py` loads CSV/TSV/JSON into
+plain row dicts (d3-fetch). `adapter.py` is the only thing that knows how to read a
 scene (duck-typed against real `bpy` shapes); `blender_adapter.py` is the
 only file that imports `bpy`.
 
@@ -93,6 +94,37 @@ opinion about yet:
   it fully (same pattern as `remove()`) because a real
   `bpy.data.collections.new()` result also needs linking into the scene
   -- otherwise it's an orphan datablock, invisible in the outliner.
+- **`parent` scopes the lookup; `parent=None` deliberately doesn't.**
+  Found when the library was first adopted in a real script (a halo-
+  merger-tree importer building `Root/Halos` + `Root/Trails` per run):
+  the original lookup searched *every* collection by name even with a
+  `parent`, so a second root's `"Halos"` silently returned the first
+  root's. With `parent`, it now only searches `parent`'s direct
+  children (`_find_child_collection`). `parent=None` keeps the old
+  global lookup -- changing it to top-level-only would silently start
+  creating duplicates in existing scripts that relied on it finding a
+  nested collection, which is worse than the inconsistency.
+- **Real collection names are global, hence the `d3_name` stamp.** A new
+  child whose name is taken elsewhere comes back as `"Halos.001"`
+  (confirmed against real bpy) -- unavoidable. Without a stamp, the
+  rerun's scoped lookup for `"Halos"` would miss it and create
+  `"Halos.002"` every run. Created collections get
+  `COLLECTION_NAME_PROP = 'd3_name'` = the requested name, matched after
+  the exact name. Same "stamp identity, don't parse names" reasoning as
+  `Join`'s `d3_key` and the tuple-path rule -- don't replace this with a
+  regex that strips `.NNN` suffixes. Known gap: a child created *without*
+  the stamp (by hand, or by pre-stamp code) under an auto-suffixed name
+  isn't recognized; one extra stamped collection gets created once, then
+  reruns are stable.
+- **An untracked `parent` must not go into `_collection_parent`.**
+  `parent=bpy.context.scene.collection` (the natural way to say "a root
+  in this scene") used to record the scene root -- which isn't in
+  `bpy.data.collections` -- as the new collection's parent, so
+  `top_level_collections()` dropped it and nothing tracked could reach
+  it: the whole subtree was invisible to `select()` (confirmed against
+  real bpy). `_record_collection_parent` now applies the same rule a
+  fresh `get_adapter()`'s `_build_collection_parent_index` does: only
+  tracked collections count as parents.
 
 **Axis ticks now exist, scoped down to lines only.** `axis.py` mirrors
 d3's `axisBottom()`/`axisLeft()` with no domain baseline and no
@@ -190,6 +222,16 @@ older `node_group.inputs` API. `mock.py`'s `MockModifier.properties.inputs`
 (a dict of `MockGNInputValue`, which just holds `.value`) mirrors this
 shape so tests exercise the real code path instead of the old
 `modifier[identifier]` shortcut.
+
+**Re-confirmed on Blender 5.4.0 Alpha (the full application, not the
+wheel):** `modifier.properties.inputs[identifier]` is still an
+`IDPropertyGroup` -- keys `value`/`type`/`attribute_name` for a field-
+capable socket like float, just `value`/`type` for object/material
+sockets (checked directly on both 5.4 and the 5.2 wheel; identical) -- and the path-walker's get/set round-trips through
+`["value"]` for float, int, bool, vector, object and material sockets --
+`tests/blender/test_modifiers_and_gn.py`'s per-socket-type test, run
+in-app via `tests/blender/run_in_blender_app.py`. No code change was
+needed; `_gn_input_get`/`_gn_input_set` already did the right thing.
 
 `mock.py`'s `MockObject.modifiers` had to stop being a bare list and
 become `MockModifierCollection` (name-addressable, like real bpy's
@@ -395,6 +437,23 @@ claim as "run and confirmed working."
   interpolation. Don't add an interpolation/easing layer here -- if
   someone wants easing, that's an F-curve interpolation mode on the
   Blender side, not something to build in Python.
+  **Custom properties need the ID-property data path.** Real
+  `obj.keyframe_insert('hp')` raises `TypeError: ... property "hp" not
+  found` for a custom prop, on both the 5.2 wheel and Blender 5.4;
+  `'["hp"]'` works. So `SceneAdapter.keyframe_insert` retries with
+  `_id_prop_path(key)` on that `TypeError`, but only when `el.get(key)`
+  has the key (duck-typed, no bpy import, inherited by
+  `LiveBlenderAdapter`). Everything else re-raises bpy's own error.
+  `MockObject.keyframe_insert` is now just as strict (it raises for a
+  bare custom-prop name and accepts `'["key"]'`), so the mock suite goes
+  through the same retry. It used to read `getattr(self, data_path)` and
+  simply couldn't keyframe a custom prop at all. Still not handled:
+  nested/tuple paths (`'modifiers.Bevel.width'`) aren't translated into
+  RNA data paths (`'modifiers["Bevel"].width'`), so `.keyframe()` on
+  those fails in real bpy. Translating would mean resolving each segment
+  the way the path-walker does, including GN input names that have no
+  RNA path at all; that's a separate design question, so it wasn't done
+  as a drive-by.
 
 ## `Selection.datum` -- closing the `(el, i)` vs. real d3's `(d, i)` gap
 
@@ -437,9 +496,23 @@ every existing script and test using the 2-arg shape to be rewritten,
 for no behavioral gain, and directly contradicts why this was built
 incrementally in the first place (see the conversation that led here:
 the ask was explicitly "update a *few* of the scripts," not migrate
-everything). The one known edge case `_arity` doesn't handle well is a
-`*args`-catch-all callable (rare) -- it falls back to the 1-arg `fn(el)`
-call, a known, accepted, minor limitation, not a bug to chase.
+everything). A `*args` callable (`lambda *a`, `def f(el, *rest)`, a
+generic decorator/wrapper) counts as arity 3 and gets the full
+`(el, d, i)`. It used to be counted by plain parameter number, so
+`lambda *a` got only `fn(el)`. This is a real (small) behaviour change
+for `*args` callables only: `def f(el, *rest)` used to receive
+`(el, i)` and now receives `(el, d, i)`. Callables without `*args` are
+unaffected.
+`**kwargs` and keyword-only parameters still count toward the plain
+total (pre-existing behaviour, left alone).
+
+`.keyframe()`'s `frame` argument goes through the same `_invoke()`
+dispatch when it's callable (evaluated once per element, before that
+element's attrs), so data whose rows each carry their own time can
+keyframe every element at its own frame in one call. Added after the
+first real adoption had to fall back to raw `obj.keyframe_insert()`
+loops for exactly that. A plain number still means "every element at
+this frame," unchanged.
 
 `points.py`/`point_attr`/`point_data`/`live_point_data` are explicitly
 **not** part of this -- those stay whole-array-only, no per-vertex
@@ -485,7 +558,14 @@ collection elsewhere first, and this project already knows (see
 "Testing status" above) that an object linked only into the scene root
 is invisible to `select()`. A convenience whose default silently
 produces invisible objects would be strictly worse than the boilerplate
-it replaces, so the explicit argument stays.
+it replaces, so it still never defaults to the ambient collection.
+**Update:** d3blender now *does* have a "current parent" concept --
+`select_all(collection)` records the collection as `Selection.parent`
+(see the ergonomics section below) -- and `join('shape')` defaults
+`collection` to that. That's the d3 behaviour the paragraph above says
+was missing, and it doesn't reopen the ambient-default trap: the parent
+is a collection the caller explicitly selected from, not whatever
+happens to be active. With no parent, `collection=` is still required.
 
 **Shape parameters only exist as creation-time arguments, verified, not
 assumed.** Checked directly against real bpy: a UV sphere created with
@@ -669,7 +749,24 @@ Geometry Nodes inputs and material shader inputs before them:
      `bpy_struct` float is now `inputs['Threshold'].default_value`, a
      socket, matching the same generalization materials underwent.
   Once the *current* shape was used, `get_attr`/`set_attr` reached it
-  immediately, no adapter changes. `scene` isn't reached through
+  immediately, no adapter changes.
+  4. **And again in 5.4** (checked on 5.4.0 Alpha): compositing became
+     a list of effects, `scene.compositor_effects` (`new(name)`/`remove`/
+     `clear`/`.active`). Each `SceneCompositorEffect` has its own
+     `node_group`, `enable_for_render`/`enable_for_preview`/`is_active`/
+     `properties`. `scene.compositing_node_group` and `scene.use_nodes`
+     still exist but emit `DeprecationWarning` (removal expected in 6.0);
+     `compositing_node_group` is a shim for the active effect's group.
+     Still no adapter change: `('compositor_effects', 'FX', 'node_group',
+     'nodes', 'Glare', ...)` resolves because the effect-name segment
+     falls through to the collection's `.get('FX')` (plain `getattr`
+     misses it, confirmed). The tests and README use `compositor_effects`
+     where the scene has it and the 5.2 properties otherwise. 5.3 hasn't
+     been checked. One trap from writing the version gate:
+     `hasattr(bpy.types.Scene, 'compositor_effects')` is `False` even on
+     5.4, because RNA properties aren't class attributes. That silently
+     skipped the 5.4-only test in the first in-app run. Check the
+     instance, or `bpy.types.Scene.bl_rna.properties`. `scene` isn't reached through
   `select()` -- there's normally exactly one current scene, so
   `bpy.context.scene` handed directly to `get_attr`/`set_attr` (the
   same "I already have the element" pattern `select(adapter, el)`
@@ -728,6 +825,99 @@ concept, nothing more" philosophy as the existing scales/`axis.py`.
   `line()`). Add those as their own functions if genuinely needed, not
   as options bolted onto `line()`.
 
+## The ergonomics pass: adapter-less select, select_all, scale chaining, csv, transitions
+
+A user-requested pass to make scripts read like d3. **Hard constraint:
+existing callers must keep working unchanged.** Three real ones exist in
+`~/.config/blender/blender-config/scripts/startup` (the halo importer,
+`country_wireframes._reconcile_geo_markers`, `gpx_import._reconcile`),
+all shaped `select(get_adapter(), list(coll.objects)).data(items,
+key=lambda i, d: ...).join(enter, exit=...)` then `.elements`/`.datum`,
+plus `scale_linear(domain, range_)`. `tests/test_ergonomics.py::
+test_existing_callers_call_shape_still_works` pins that shape, and the
+gpx/country helpers themselves were called headlessly in Blender 5.4
+with synthetic items after this change (same objects on rerun, removals
+correct). Don't break that test to make something prettier.
+
+- **`select(target)` without an adapter** gets `default_adapter()`: a
+  *fresh* `get_adapter()` per call (or whatever `set_default_adapter()`
+  installed -- an adapter or a factory; that's how the mock suite tests
+  this path). Fresh on purpose, per the "get_adapter() snapshots" rule;
+  caching one would bring the stale-index bug back. The selection keeps
+  its adapter for the whole chain. `select()`'s signature became
+  `select(*args, adapter=None, target=...)` so both the one- and
+  two-positional forms and the old `select(adapter=..., target=...)`
+  keyword form all work. `query.py` imports `blender_adapter` lazily
+  inside `default_adapter()`, so `blender_adapter.py` is still the only
+  file that imports `bpy`, and the package still imports without it.
+  Outside Blender with no default set, the error says to pass an adapter.
+- **`select(collection)` was deliberately NOT changed** to mean "its
+  objects". It already means "wrap this collection as the element"
+  (d3.select(node)), and changing it would silently change existing
+  code. `select_all(collection)` is the new spelling, mirroring d3's
+  `parent.selectAll()`: its direct objects, with `Selection.parent` set.
+  `filter()` keeps the parent; scoped `.select()` doesn't.
+- **`join()` uses the parent** as the default `collection=` for the
+  shape-name form, and links a callable `enter`'s result into it **only
+  if the element isn't in any collection yet**. Existing callers' enter
+  functions link objects themselves and their selections have no parent,
+  so nothing changes for them. An element `enter` placed elsewhere is
+  never moved.
+- **Several joined groups in one collection need `select_all(coll,
+  '.group')`**, the analogue of d3's `selectAll('rect.bar')`. Without
+  the narrowing selector, group A's join sees group B's `d3_key`-stamped
+  objects and removes them as exits. Unkeyed objects (an axis mesh, hand-
+  added objects) are never touched by a join, which was already true.
+- **`.data(key=...)`** also takes a field name or a 1-arg `fn(d)`. The
+  2-arg form stays `fn(i, d)`, index first (the reverse of d3); it can't
+  be flipped without breaking every existing caller.
+- **Join result:** it was already the merged enter+update selection in
+  data order, so chaining after `.join()` already hit both (verified,
+  now documented and tested). New: `.entered` / `.updated` sub-
+  selections on the result.
+- **Pushed back on `join(enter=fn(selection), update=fn(selection))`**
+  (d3 v7 sub-selection callables). `enter` is already a per-datum
+  `fn(d)`, and a selection-taking `fn(sel)` has the same arity, so the
+  two can't be told apart; adding it would need a flag or a different
+  method, which buys little over `.entered`/`.updated`. Not built.
+- **Transitions** (`Selection.transition()` -> `Transition`) are built
+  on `adapter.keyframe_insert()`: current value at `start+delay`, target
+  at `start+delay+duration`, `start` default `adapter.current_frame()`
+  (new adapter method: a settable attribute on the mock, the scene frame
+  live). Chained `.transition()` starts at each element's previous end.
+  No easing layer, consistent with the `.keyframe()` rule above: that's
+  F-curve interpolation in Blender. If there's no current value (a custom
+  prop that doesn't exist yet), only the end key is written.
+- **Scales became small classes** with `__call__`, keeping every old
+  construction signature and attribute: `scale_band(...).step` is still
+  a number (d3 makes it a method), `scale_ordinal` with an explicit
+  domain still maps unknowns to `range_[0]`, `scale_band` still raises
+  `KeyError` for unknowns, `scale_sequential` still clamps by default.
+  New: chaining getters/setters, `nice()`/`ticks()` (d3-array's
+  1/2/5 x 10^k algorithm, `scale.ticks()` is the module function),
+  `clamp()`, `copy()`, tuple ranges interpolated per component, and the
+  implicit ordinal domain when no domain is given. `scale_time` has no
+  `ticks()`/`nice()`: d3's calendar ticks are a different algorithm and
+  numeric ticks on timestamps would be wrong-looking, so it's absent
+  rather than misleading. `axis.ticks()` (fixed-width) was left as is;
+  `scale.ticks()` is the nice one.
+- **`fetch.py`** (`csv`/`tsv`/`dsv`/`json`/`auto_type`): typed by
+  default because d3 code almost always passes `d3.autoType`. Ints vs.
+  floats are kept apart (d3 has one number type); dates become
+  `datetime.date`/`datetime`. Stdlib only, no bpy, so `//` paths are the
+  caller's job. Not in `__all__` so a star-import can't shadow the
+  stdlib `csv`/`json` modules.
+- **`examples/script_runner/`** follows the Script Runner extension's
+  contract (`PARAMS` + `execute(context, params)`, `_`-prefixed files
+  skipped, `.py` only). Each script duplicates two tiny helpers (CSV-path
+  and collection fallback) instead of sharing a `_common.py`: the runner
+  doesn't put the folder on `sys.path`, and self-contained files are
+  easier to copy. `csv_to_points.py` resizes the mesh itself when the
+  row count changes (`clear_geometry()` + `from_pydata()`), which keeps
+  d3blender's own never-resize rule intact. `tests/blender/
+  test_script_runner_examples.py` runs all three through `execute()`
+  with reruns and setting changes, on the wheel and in-app on 5.4.
+
 ## Known gotchas (see README for the full list)
 
 - **Bare word = type, `#name` = a specific instance.** `Weapons > mesh`
@@ -769,6 +959,30 @@ concept, nothing more" philosophy as the existing scales/`axis.py`.
   dependency of `d3blender` itself (see that example's own section below),
   and the headless `bpy` module isn't a substitute for the full Blender
   application those two libraries assume.
+- The PyPI wheel stops at 5.2.0, so newer versions are checked by
+  running the same suite inside an installed Blender binary:
+  `blender --background --factory-startup --python
+  tests/blender/run_in_blender_app.py -- -q`. It forces this checkout's
+  `src/` to be the d3blender under test (a user's Blender startup scripts
+  may otherwise import another copy, e.g. an editable install from a
+  different project's venv) and prints the path it used. Last run: Blender
+  5.4.0 Alpha, 57/57 passed in ~35 s, no warnings (the 5.2 wheel: 56
+  passed, 1 skipped, ~4 s).
+- **The `clean_scene` reset is `read_homefile(use_empty=True,
+  use_factory_startup=True)`, not `read_factory_settings(use_empty=True)`.**
+  In the full app the latter also resets preferences, which re-registers
+  every add-on/extension and re-runs user startup hooks: ~3.2 s per call
+  on Blender 5.4, twice per test. That made the in-app run take ~5 minutes,
+  ~50x the wheel. `read_homefile` gives an identical empty `bpy.data`
+  (checked field by field on 5.2 and 5.4) at ~0.28 s in-app. Don't switch
+  back to save a line. The trade-off is that prefs aren't reset between
+  tests, which is why the in-app command keeps `--factory-startup`.
+- `pyproject.toml` sets `--import-mode=importlib` because `tests/` and
+  `tests/blender/` share test-file basenames on purpose (mock vs.
+  real-bpy versions of the same feature). With the default import mode,
+  a whole-repo `.venv-blender/bin/pytest` died with "import file
+  mismatch". Now it runs both suites (~215 tests). Don't "fix" this by
+  renaming files or adding `__init__.py` packages instead.
 - One real limitation `tests/blender/` surfaced that the mock couldn't:
   **`bpy.context.scene.collection` (the scene's root "Scene Collection")
   is not itself a member of `bpy.data.collections`**, and `get_adapter()`
@@ -796,13 +1010,17 @@ concept, nothing more" philosophy as the existing scales/`axis.py`.
 
 ```bash
 pip install -e ".[dev]"        # or: uv venv && uv pip install -e ".[dev]"
-pytest                          # full mock suite, ~73 tests, skips tests/blender/
+pytest                          # full mock suite, ~160 tests, skips tests/blender/
 python examples/bar_chart.py    # and the other 14 in examples/ (nine need Blender)
 
 # real-bpy suite (separate venv, see tests/blender/README.md):
 uv venv --python 3.13 .venv-blender
 uv pip install --python .venv-blender/bin/python -e ".[dev,blender-test]"
-.venv-blender/bin/pytest tests/blender
+.venv-blender/bin/pytest tests/blender     # ~56 tests (+1 skipped on the 5.2 wheel)
+.venv-blender/bin/pytest                  # both suites at once (importlib import mode)
+
+# same suite inside a real Blender binary (needs .venv-blender for pytest):
+/path/to/blender --background --factory-startup --python tests/blender/run_in_blender_app.py -- -q
 ```
 
 ## If asked to extend this

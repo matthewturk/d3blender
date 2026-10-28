@@ -69,22 +69,49 @@ class LiveBlenderAdapter(SceneAdapter):
         else:
             bpy.data.objects.remove(el, do_unlink=True)
 
+    def current_frame(self):
+        import bpy
+
+        return bpy.context.scene.frame_current
+
+    def link(self, el, collection):
+        """Real-bpy version of SceneAdapter.link()."""
+        collection.objects.link(el)
+        if not any(o == el for o in self.objects):
+            self.objects.append(el)
+
     def get_or_create_collection(self, name, parent=None):
         """Same contract as SceneAdapter.get_or_create_collection(),
         except a real bpy.data.collections.new() result also needs
         linking into the scene (or a parent collection) to actually show
         up -- an unlinked collection is an orphan datablock, invisible in
-        the outliner/viewport."""
+        the outliner/viewport.
+
+        With `parent` given, the lookup is scoped to `parent.children`
+        (see the base docstring). Collection names are global in real
+        Blender, so a new child whose name is already taken elsewhere
+        comes back auto-suffixed ("Halos.001") -- expected, and found
+        again on rerun via the `d3_name` stamp rather than its name.
+        `parent=bpy.context.scene.collection` works and is equivalent
+        to `parent=None` for visibility (confirmed against real bpy),
+        except that the lookup is scoped to the scene root's direct
+        children rather than every collection in the file."""
         import bpy
 
-        for c in self.collections:
-            if self.name_of(c) == name:
-                return c
+        if parent is None:
+            for c in self.collections:
+                if self.name_of(c) == name:
+                    return c
+        else:
+            found = self._find_child_collection(parent, name)
+            if found is not None:
+                return found
         coll = bpy.data.collections.new(name)
+        coll[self.COLLECTION_NAME_PROP] = name
         (parent if parent is not None else bpy.context.scene.collection).children.link(coll)
         self.collections.append(coll)
         if parent is not None:
-            self._collection_parent.setdefault(id(coll), []).append(parent)
+            self._record_collection_parent(coll, parent)
         return coll
 
     def creator(self, name, collection, **create_kwargs):

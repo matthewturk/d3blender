@@ -33,6 +33,13 @@ blender-test = [
 where = ["src"]
 
 [tool.pytest.ini_options]
+# tests/ and tests/blender/ deliberately share some test-module basenames
+# (test_points.py, test_point_attrs.py, test_join_creator.py: mock vs.
+# real-bpy versions of the same feature) and neither directory is a
+# package. The default "prepend" import mode then refuses a whole-repo run
+# ("import file mismatch"); importlib mode imports each file by its path,
+# so `pytest` from either venv collects both directories.
+addopts = "--import-mode=importlib"
 markers = [
     "blender: exercises real bpy (tests/blender/) -- needs the blender-test extra; auto-skipped otherwise, see tests/blender/README.md",
 ]

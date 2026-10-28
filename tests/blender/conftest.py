@@ -10,6 +10,10 @@ bpy = pytest.importorskip("bpy")
 pytestmark = pytest.mark.blender
 
 
+def _reset():
+    bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True)
+
+
 @pytest.fixture(autouse=True)
 def clean_scene():
     """Real `bpy.data` is process-global, unlike the mock's fresh objects
@@ -19,18 +23,30 @@ def clean_scene():
     so the next test, or a REPL poking at the same process, starts
     clean).
 
-    `bpy.app.handlers` is separate from `bpy.data` and read_factory_settings
-    doesn't touch it -- a test using live_point_data() that raises before
+    `bpy.app.handlers` is separate from `bpy.data` and the reset isn't
+    relied on to clear it -- a test using live_point_data() that raises before
     its own `finally: stop()` would otherwise leave a handler registered
     whose closure references objects the next reset just deleted, which
     would then blow up the *next* test's frame_set() instead of this
     one's. Clear it explicitly as a backstop, on top of each test calling
-    stop() itself."""
-    bpy.ops.wm.read_factory_settings(use_empty=True)
+    stop() itself.
+
+    `read_homefile(use_empty=True, use_factory_startup=True)`, not
+    `read_factory_settings(use_empty=True)`: both leave bpy.data in the
+    identical empty factory state (checked field by field on the 5.2
+    wheel and Blender 5.4), but read_factory_settings also resets
+    *preferences*, which in the full application means re-registering
+    every enabled add-on/extension and re-running the user's startup
+    hooks. Measured ~3.2s per call in Blender 5.4 vs ~0.28s for
+    read_homefile, which made the in-app run ~50x slower than the wheel.
+    Preferences therefore aren't reset between tests -- run the app with
+    --factory-startup (run_in_blender_app.py's documented command) so
+    they start at factory values; nothing here changes them."""
+    _reset()
     bpy.app.handlers.frame_change_pre.clear()
     yield
     bpy.app.handlers.frame_change_pre.clear()
-    bpy.ops.wm.read_factory_settings(use_empty=True)
+    _reset()
 
 
 @pytest.fixture

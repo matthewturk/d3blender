@@ -12,6 +12,14 @@ Two axes, matching Blender's two real hierarchies:
 
 _MISSING = object()
 
+
+def _id_prop_path(key):
+    """RNA data path for a custom (ID) property: 'hp' -> '["hp"]', with
+    backslashes and double quotes escaped the way bpy's path parser
+    expects inside a quoted key."""
+    escaped = key.replace('\\', '\\\\').replace('"', '\\"')
+    return f'["{escaped}"]'
+
 # Mesh point-domain (per-vertex) attribute shapes -- verified against real
 # bpy 5.2 (see tests/blender/test_point_attrs.py): a POINT-domain attribute's
 # value lives under a type-dependent field name, same "duck-typed shape
@@ -371,7 +379,39 @@ class SceneAdapter:
         mesh.update()
 
     def keyframe_insert(self, el, data_path, frame):
-        el.keyframe_insert(data_path=data_path, frame=frame)
+        """Keyframe `data_path` on `el` at `frame`. A plain custom
+        property name (`'hp'`) is retried as its ID-property data path
+        (`'["hp"]'`): real bpy's keyframe_insert only resolves RNA
+        properties by bare name and raises `TypeError: ... property "hp"
+        not found` for a custom prop -- confirmed on the 5.2 wheel and
+        Blender 5.4. Duck-typed (the retry only happens when `el.get()`
+        actually has that key), so no bpy import and the mock follows
+        the same path."""
+        try:
+            el.keyframe_insert(data_path=data_path, frame=frame)
+        except TypeError:
+            getter = getattr(el, 'get', None)
+            if not (isinstance(data_path, str) and callable(getter)
+                    and getter(data_path, _MISSING) is not _MISSING):
+                raise
+            el.keyframe_insert(data_path=_id_prop_path(data_path), frame=frame)
+
+    def current_frame(self):
+        """The frame a transition starts from when none is given. The
+        base/mock adapter has no timeline, so it's a plain attribute you
+        can set (`adapter.frame_current = 10`), default 1;
+        LiveBlenderAdapter reads the scene's real current frame."""
+        return getattr(self, 'frame_current', 1)
+
+    def link(self, el, collection):
+        """Put `el` into `collection` (Join.join() does this for an
+        entered element that isn't in any collection yet, when the
+        selection knows its parent). Base/mock version: list bookkeeping;
+        LiveBlenderAdapter uses `collection.objects.link()`."""
+        collection.objects.append(el)
+        el.users_collection = tuple(getattr(el, 'users_collection', None) or ()) + (collection,)
+        if not any(o is el for o in self.objects):
+            self.objects.append(el)
 
     def remove(self, el):
         # Real adapter: bpy.data.objects.remove(el, do_unlink=True), which
@@ -425,20 +465,73 @@ class SceneAdapter:
             "plain callable as join()'s enter= instead."
         )
 
+    # Custom property stamped on every collection get_or_create_collection()
+    # creates, holding the name it was *asked* for -- same idea as Join's
+    # d3_key stamp. Real Blender collection names are globally unique, so a
+    # second "Halos" created under a different parent comes back as
+    # "Halos.001"; without the stamp, a rerun's parent-scoped lookup for
+    # "Halos" would miss it and create "Halos.002", and so on.
+    COLLECTION_NAME_PROP = 'd3_name'
+
     def get_or_create_collection(self, name, parent=None):
         """Get-or-create a collection by name -- the Blender equivalent of
-        d3.create('svg'): a container to serve as a join's root. Pass
-        `parent` (another collection already known to this adapter) to
-        nest the new collection instead of adding it at the top level."""
-        for c in self.collections:
-            if self.name_of(c) == name:
-                return c
+        d3.create('svg'): a container to serve as a join's root.
+
+        `parent=None`: looks `name` up across *every* collection the
+        adapter knows about (unchanged from before `parent` scoping
+        existed), and creates a new top-level one if there's no match.
+
+        `parent` given: looks only among `parent`'s *own* children, so
+        two different roots can each have their own "Halos" child
+        without the second call grabbing the first root's. A child
+        matches if it's named exactly `name`, or if it carries the
+        `d3_name` stamp (COLLECTION_NAME_PROP) for `name` -- the stamp
+        is what finds a child real Blender auto-suffixed at creation
+        ("Halos.001", because "Halos" was already taken elsewhere in the
+        file) again on a rerun. `parent` may be a collection the adapter
+        doesn't track -- e.g. the scene's root collection, which isn't
+        in `bpy.data.collections` -- in which case the new collection is
+        still treated as top-level for select(), matching what a fresh
+        get_adapter() would build."""
+        if parent is None:
+            for c in self.collections:
+                if self.name_of(c) == name:
+                    return c
+        else:
+            found = self._find_child_collection(parent, name)
+            if found is not None:
+                return found
         coll = _Collection(name)
+        coll[self.COLLECTION_NAME_PROP] = name
         self.collections.append(coll)
         if parent is not None:
             parent.children.append(coll)
-            self._collection_parent.setdefault(id(coll), []).append(parent)
+            self._record_collection_parent(coll, parent)
         return coll
+
+    def _find_child_collection(self, parent, name):
+        """`parent`'s direct child collection for `name` -- exact name
+        first, then the d3_name stamp (see get_or_create_collection)."""
+        children = self.sub_collections(parent)
+        for c in children:
+            if self.name_of(c) == name:
+                return c
+        for c in children:
+            getter = getattr(c, 'get', None)
+            if callable(getter) and getter(self.COLLECTION_NAME_PROP) == name:
+                return c
+        return None
+
+    def _record_collection_parent(self, coll, parent):
+        """Index `coll` under `parent` -- but only if `parent` is itself
+        a tracked collection, the same rule _build_collection_parent_index
+        follows. Recording an untracked parent (the scene's root
+        collection) would drop `coll` from top_level_collections() with
+        nothing tracked above it to reach it from, making it and
+        everything in it invisible to select() (confirmed against real
+        bpy before this check existed)."""
+        if any(c is parent for c in self.collections):
+            self._collection_parent.setdefault(id(coll), []).append(parent)
 
     def create_line_mesh(self, collection, name, segments):
         """Create a single mesh object containing one edge per (p0, p1)

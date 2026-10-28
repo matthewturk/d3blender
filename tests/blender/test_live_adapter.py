@@ -6,6 +6,8 @@ duck-typed reads/writes in adapter.py that have never run against real
 bpy shapes before (see CLAUDE.md's Testing status section)."""
 
 import bpy
+import pytest
+from bpy_extras import anim_utils
 
 from d3blender import select
 from d3blender.blender_adapter import get_adapter
@@ -97,3 +99,79 @@ def test_create_line_mesh_builds_a_real_mesh_with_one_edge_per_segment():
     assert len(obj.data.vertices) == 4
     assert len(obj.data.edges) == 2
     assert obj in list(coll.objects)
+
+
+def test_get_or_create_collection_scopes_lookup_to_the_parent_and_suffixes_names():
+    """Two roots each get their own "Halos" child. Real collection names
+    are global, so the second one is auto-suffixed by Blender itself --
+    expected; the d3_name stamp is what lets a rerun find it again."""
+    adapter = get_adapter()
+    root_a = adapter.get_or_create_collection('RootA')
+    root_b = adapter.get_or_create_collection('RootB')
+
+    halos_a = adapter.get_or_create_collection('Halos', parent=root_a)
+    halos_b = adapter.get_or_create_collection('Halos', parent=root_b)
+
+    assert halos_a != halos_b
+    assert halos_a.name == 'Halos'
+    assert halos_b.name == 'Halos.001'
+    assert list(root_a.children) == [halos_a]
+    assert list(root_b.children) == [halos_b]
+
+    # Rerun, with a fresh adapter as a real script rerun would have.
+    adapter = get_adapter()
+    assert adapter.get_or_create_collection('Halos', parent=root_a) == halos_a
+    assert adapter.get_or_create_collection('Halos', parent=root_b) == halos_b
+    assert len(bpy.data.collections) == 4
+
+
+def test_get_or_create_collection_under_the_scene_root_stays_selectable(spawn):
+    """parent=bpy.context.scene.collection (an untracked collection) used
+    to drop the new collection out of select()'s reach entirely."""
+    adapter = get_adapter()
+
+    chart = adapter.get_or_create_collection('Chart', parent=bpy.context.scene.collection)
+    spawn('Bar', chart)
+
+    assert chart in list(bpy.context.scene.collection.children)
+    assert [el.name for el in select(adapter, '#Chart mesh')] == ['Bar']
+    assert [el.name for el in select(get_adapter(), '#Chart mesh')] == ['Bar']
+
+
+def test_keyframe_with_a_per_element_frame_accessor_writes_real_fcurve_keys(spawn):
+    adapter = get_adapter()
+    chart = adapter.get_or_create_collection('Chart')
+    data = [{'id': 'a', 'frame': 7, 'x': 1.0}, {'id': 'b', 'frame': 19, 'x': 2.0}]
+
+    sel = (select(adapter, '#Chart mesh')
+           .data(data, key=lambda i, d: d['id'])
+           .join(enter=lambda d: spawn(f"Ball_{d['id']}", chart)))
+    sel.keyframe(lambda el, d, i: d['frame'], location=lambda el, d, i: (d['x'], 0.0, 0.0))
+
+    # Layered actions (Blender 5.x, confirmed on bpy 5.2): Action.fcurves
+    # is gone, F-curves live in the slot's channelbag.
+    for el, d in zip(sel.elements, data):
+        bag = anim_utils.action_get_channelbag_for_slot(
+            el.animation_data.action, el.animation_data.action_slot)
+        fcurve_x = next(fc for fc in bag.fcurves
+                        if fc.data_path == 'location' and fc.array_index == 0)
+        keys = [tuple(kp.co) for kp in fcurve_x.keyframe_points]
+        assert keys == [(d['frame'], d['x'])]
+
+
+def test_keyframe_on_a_custom_property_writes_an_id_property_fcurve(spawn):
+    """bpy's own keyframe_insert('hp') raises 'property "hp" not found'
+    for a custom prop (confirmed on 5.2 and 5.4); the adapter retries
+    with the ID-property path '["hp"]'."""
+    chart = get_adapter().get_or_create_collection('Chart')
+    obj = spawn('Ball', chart, hp=1.0)
+    adapter = get_adapter()
+
+    select(adapter, obj).keyframe(3, hp=5.0).keyframe(9, hp=7.0)
+
+    bag = anim_utils.action_get_channelbag_for_slot(
+        obj.animation_data.action, obj.animation_data.action_slot)
+    fcurve = next(fc for fc in bag.fcurves if fc.data_path == '["hp"]')
+    assert [tuple(kp.co) for kp in fcurve.keyframe_points] == [(3.0, 5.0), (9.0, 7.0)]
+    bpy.context.scene.frame_set(6)
+    assert obj['hp'] == pytest.approx(6.0, abs=0.01)  # symmetric midpoint of the F-curve

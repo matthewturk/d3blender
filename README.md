@@ -4,10 +4,25 @@ A d3.js-flavored selector, join/reconciliation, and animation layer over
 Blender's scene graph. Written in Python, for Python.
 
 ```python
-from d3blender import select
+import d3blender as d3
 
-select(adapter, '.enemy[hp>0]').attr('hp', lambda el, i: el.get('hp') - 10)
+rows = d3.csv('sales.csv')                       # typed: numbers, bools, dates, None
+chart = d3.collection('Chart')                   # get-or-create
+y = d3.scale_linear().domain((0, d3.array.max(rows, lambda d: d['revenue']))).nice().range((0, 4))
+
+bars = (d3.select_all(chart)                     # the collection's objects, chart as parent
+        .data(rows, key='month')                 # identity = the month column
+        .join('cube')                            # new rows -> new cubes in chart; gone rows -> removed
+        .attr('location', lambda el, d, i: (i * 1.5, 0, y(d['revenue']) / 2))
+        .attr('scale', lambda el, d, i: (0.6, 0.6, y(d['revenue']))))
+
+bars.entered.transition(20, delay=lambda el, i: i * 3).attr('location', lambda el, d, i: (i * 1.5, 0, y(d['revenue'])))
+d3.select('.enemy[hp>0]').attr('hp', lambda el: el['hp'] - 10)
 ```
+
+Rerun the script after editing the CSV or a setting and the same objects
+update in place. Inside Blender no adapter argument is needed; outside it
+(tests, the mock) you pass one: `select(adapter, '...')`.
 
 If you like d3's `select` / `.attr()` / `.data().join()` idiom and would
 rather write plain Python against `bpy` than wire up a web frontend, this
@@ -106,21 +121,38 @@ against real `bpy` (a separate Python 3.13 venv, since PyPI's headless
 `bpy` module only ships `cp313` wheels), see `tests/blender/README.md`.
 
 ```python
+import d3blender as d3          # inside Blender
+
+height = d3.scale_linear().domain((0, 100)).range((0.2, 4.0))
+
+d3.select('mesh.bar').attr('scale', lambda el: (1, 1, height(el.get('value', 0))))
+```
+
+The same thing with an explicit adapter, which is what the mock, tests,
+and code written before the adapter became optional use:
+
+```python
 from d3blender import select, scale_linear
-from d3blender.blender_adapter import get_adapter   # only import this inside Blender
+from d3blender.blender_adapter import get_adapter
 
 adapter = get_adapter()
-
 height = scale_linear(domain=(0, 100), range_=(0.2, 4.0))
-
-(select(adapter, 'mesh.bar')
-    .each(lambda el, i: setattr(el, 'scale', (1, 1, height(el.get('value', 0))))))
+select(adapter, 'mesh.bar').attr('scale', lambda el: (1, 1, height(el.get('value', 0))))
 ```
+
+**Ready-to-run scripts:** `examples/script_runner/` holds three Script
+Runner scripts (bar chart, scatter plot, CSV to points) with sample
+CSVs -- see "Script Runner examples" below.
 
 ## API
 
-### `select(adapter, target) -> Selection`
-Top-level query against the whole scene. `target` is usually a selector
+### `select(target)` / `select(adapter, target)` -> `Selection`
+Top-level query against the whole scene. The adapter is optional: with
+one argument (or `adapter=None`), `select()` builds a **fresh**
+`get_adapter()` snapshot for that call, so it always sees the current
+scene (see "Live vs. cached"). Pass one explicitly to pin it (and
+outside Blender you must, or call `d3blender.set_default_adapter(adapter)`
+once -- that also takes a zero-argument factory). `target` is usually a selector
 string, but -- mirroring d3's `d3.select(node)` -- it can also be an
 element, or an iterable of elements, to wrap directly with no CSS
 involved. Reach for that form to re-wrap an element you already have
@@ -128,13 +160,30 @@ involved. Reach for that form to re-wrap an element you already have
 like `"Cube.001"` aren't valid `#name` selector text, since CSS reads the
 `.` as a class.
 
+### `select_all(target, selector=None, adapter=None) -> Selection`
+d3's `parent.selectAll(...)`, and the usual way to start a join. With a
+**collection**, it selects that collection's own objects and remembers
+the collection as the selection's `parent`, which `.join()` then uses as
+the home for new elements (below). With a selector string or elements, it
+behaves like `select()`. `selector` narrows the result (a selector
+string or predicate, as in `.filter()`): use it when one collection
+holds several separately joined groups, e.g. `select_all(chart, '.bar')`
+together with `.classed('bar', True)` after that group's join --
+otherwise a join would count the other group's keyed objects as its own
+and remove them.
+
+### `collection(name, parent=None, adapter=None)`
+`adapter.get_or_create_collection()` without holding an adapter (see
+Adapters for how `parent` scopes the lookup).
+
 ### `Selection`
 
 Every callable a `Selection` method accepts -- `.attr()`'s `value`,
 `.each()`'s `fn`, `.keyframe()`'s attr values, `.filter()`'s
 `predicate` -- can be written as `fn(el)`, `fn(el, i)`, or
 `fn(el, d, i)`, and the right one is picked automatically by the
-callable's own arity. `d` is this element's own bound datum -- the same
+callable's own arity (a `*args` callable, like a generic wrapper, gets
+all three). `d` is this element's own bound datum -- the same
 thing real d3's `(d, i) => ...` accessors receive directly, because a
 d3 selection keeps data bound to its DOM nodes permanently once joined.
 d3blender mirrors that with `Selection.datum`, a list parallel to
@@ -164,7 +213,30 @@ gets `d=None`, no error.
   `.attr()`
 - `.keyframe(frame, **attrs)` -- sets each attr and drops a real Blender
   keyframe at `frame`. Blender's own F-curves do the interpolation, so
-  this is the whole "transition" story: `sel.keyframe(1, location=a).keyframe(30, location=b)`
+  this is the whole "transition" story: `sel.keyframe(1, location=a).keyframe(30, location=b)`.
+  `frame` can also be a callable (same `fn(el)`/`fn(el, i)`/`fn(el, d, i)`
+  shapes, evaluated once per element) so each element lands on its own
+  frame -- e.g. `sel.keyframe(lambda el, d, i: d['frame'], location=lambda el, d, i: d['pos'])`
+  for data whose rows each carry their own time. Custom properties work
+  too (`sel.keyframe(10, hp=5)`): bpy's own `keyframe_insert('hp')`
+  rejects a custom prop by bare name, so the adapter retries it as the
+  ID-property path `'["hp"]'` (confirmed on 5.2 and 5.4). Nested paths
+  (`'modifiers.Bevel.width'`, tuples) aren't translated into RNA data
+  paths, so keyframe those on the owning struct yourself
+- `.transition(duration=24, delay=0, start=None)` -> `Transition` --
+  d3's transitions on top of `.keyframe()`. Each `.attr(key, value)` on
+  the transition keyframes the element's *current* value at
+  `start + delay` and the new value at `start + delay + duration` (in
+  frames; `start` defaults to the scene's current frame). Any of the
+  three can be a per-element callable, so staggering is
+  `delay=lambda el, i: i * 3`. `.attr()` calls chain into one change;
+  `.duration(n)`/`.delay(n)` re-time the `.attr()` calls after them;
+  `.transition(...)` on a transition starts the next one where each
+  element's previous one ended; `.selection()` gets back the Selection.
+  An attr with no current value (a custom prop that doesn't exist yet)
+  only gets the end keyframe. There's no easing in Python -- set the
+  F-curve interpolation in Blender (or the default in Preferences >
+  Animation)
 - `.filter(predicate)` -- a selector string, or a callable as above;
   survivors keep their own bound datum (`kept.datum` lines up with
   `kept.elements`)
@@ -174,23 +246,45 @@ gets `d=None`, no error.
   on (one element can have many matching descendants), so this doesn't
   try to guess one; rebind with a fresh `.data()` if you need one
 - `.remove()` -- removes every element in the selection
-- `.data(items, key=None) -> Join`
+- `.data(items, key=None) -> Join` -- `key` identifies an item across
+  reruns: a field name (`key='id'` is `d['id']`), a one-argument
+  callable `fn(d)`, or the original two-argument `fn(i, d)` (note: index
+  first, the reverse of d3's `(d, i)`). Default: the item's index
+- `.parent` -- the collection a `select_all(collection)` selection came
+  from (else `None`); `.entered` / `.updated` -- on a `.join()` result,
+  the newly created vs. already existing elements, each bound to its
+  data (else `None`)
 
 ### `Join`
 - `.join(enter, update=None, exit=None) -> Selection` -- reconciles by
   identity (a stamped `d3_key` custom property). `enter(d)` must return
   the created element; `update(el, d)` and `exit(el)` are optional (a
   missing `exit` just calls `adapter.remove(el)`). The returned
-  `Selection`'s `.datum` is each element's own item from `items`, in the
-  same order -- rerunning `.data(newItems).join(...)` rebinds it to the
-  new items, not stale ones.
+  `Selection` is the **merged** enter + update selection in data order,
+  so `.attr()`/`.keyframe()`/`.transition()` chained after `.join()`
+  apply to every element the data describes; `.entered`/`.updated` hold
+  the two halves. Its `.datum` is each element's own item from `items`,
+  in the same order -- rerunning `.data(newItems).join(...)` rebinds it
+  to the new items, not stale ones.
+- When the selection came from `select_all(collection)`, that collection
+  is the default home for new elements, like d3 appending to the parent:
+  the shape-name form below uses it unless `collection=` is given, and
+  an element a callable `enter` returns that isn't in any collection yet
+  (say, a bare `bpy.data.objects.new()`) is linked into it. An element
+  `enter` already linked somewhere is left alone. With no parent, nothing
+  changes from before.
+- `enter`/`update`/`exit` are per-element callables. d3 v7's
+  `join(enter => enter.append(...), update => ...)` (callables that
+  receive whole sub-selections) isn't supported: it can't be told apart
+  from the per-element `enter(d)` form by its signature. Use `.entered`/
+  `.updated` on the result for the same effect.
 - `enter` can also be a shape name string (e.g. `.join('uv_sphere',
   collection=chart)`) -- real d3's own `selection.join("circle")`
   shorthand, dispatched through `adapter.creator(name, collection,
-  **create_kwargs)`. `collection` is required (there's no DOM-like
-  implicit parent to default to, and defaulting to Blender's ambient
-  "active collection" risks landing objects somewhere invisible to
-  `select()` -- see Known limitations); other kwargs are creation-time
+  **create_kwargs)`. `collection` comes from the selection's parent
+  (`select_all(chart)...join('uv_sphere')`) or must be passed; it never
+  defaults to Blender's ambient "active collection", which risks landing
+  objects somewhere invisible to `select()` -- see Known limitations; other kwargs are creation-time
   parameters (radius, segments, ring_count, ...), each a plain value or
   a per-datum `fn(d) -> value`. Real bpy only (`LiveBlenderAdapter`) --
   the mock's `creator()` raises clearly, since there's no `bpy.ops`
@@ -223,12 +317,15 @@ lands on a `NODES` modifier, the next segment is looked up by name
 against `modifier.node_group.interface.items_tree` (the Blender
 4.0+/5.x shape -- no legacy `node_group.inputs` support) and resolved to
 its real key automatically. Reading/writing the value at that key goes
-through `modifier.properties.inputs[key].value` -- as of Blender 5.2,
+through `modifier.properties.inputs[key]["value"]` -- as of Blender 5.2,
 GN modifier inputs stopped being plain ID properties
 (`modifier[key] = value`, which now raises "id properties not supported
 for this type") and moved onto this dedicated RNA property wrapper; this
-project targets 5.3+, so there's no fallback to the pre-5.2 shape. So
-the same syntax reaches Geometry Nodes inputs too, no special-cased API:
+project targets 5.3+, so there's no fallback to the pre-5.2 shape.
+Confirmed unchanged on **Blender 5.4.0 Alpha** (the full application,
+via `tests/blender/run_in_blender_app.py`): path-walker get/set
+round-trips for float, int, bool, vector, object and material sockets.
+So the same syntax reaches Geometry Nodes inputs too, no special-cased API:
 
 ```python
 select(adapter, '#Chart mesh').attr(('modifiers', 'Scatter', 'Size'), 2.0)
@@ -356,23 +453,50 @@ Known limitations) -- link it into a real collection, not just
 
 A third node-tree domain, after Geometry Nodes and materials, reachable
 the same generic way -- confirmed against real bpy. **The exact API
-here is version-sensitive and changed recently**: this Blender version
-stores the compositor as a real node-group datablock on
-`scene.compositing_node_group`, not the older `scene.node_tree`, and
-`use_nodes = True` doesn't create that node group for you the way it
-does for a material -- you create and assign it yourself:
+here is version-sensitive and has changed twice**, so check which shape
+your Blender has:
+
+- **Blender 5.4** (checked on 5.4.0 Alpha): compositing is a list of
+  *effects*, `scene.compositor_effects` (`new(name)`/`remove`/`clear`,
+  plus `.active`). Each `SceneCompositorEffect` has its own `node_group`
+  (assign a `CompositorNodeTree`), `enable_for_render`,
+  `enable_for_preview`, `is_active` and `properties`.
+  `scene.compositing_node_group` and `scene.use_nodes` still exist but
+  are deprecated (removal expected in 6.0); `compositing_node_group` is
+  now a shim for the active effect's group.
+- **Blender 5.2** (the PyPI wheel): no `compositor_effects`. The
+  compositor is a node-group datablock on `scene.compositing_node_group`
+  (not the older `scene.node_tree`), and `use_nodes = True` doesn't
+  create that group for you the way it does for a material.
+- 5.3 hasn't been checked. Test for the property on the instance
+  (`hasattr(scene, 'compositor_effects')`), or on the type via
+  `'compositor_effects' in bpy.types.Scene.bl_rna.properties`. A
+  class-level `hasattr(bpy.types.Scene, ...)` is always `False`, because
+  RNA properties aren't class attributes.
 
 ```python
 group = bpy.data.node_groups.new('Compositing', 'CompositorNodeTree')
-scene.compositing_node_group = group
-scene.use_nodes = True
+if hasattr(scene, 'compositor_effects'):          # 5.4
+    scene.compositor_effects.new('FX').node_group = group
+    prefix = ('compositor_effects', 'FX', 'node_group')
+else:                                             # 5.2
+    scene.compositing_node_group = group
+    scene.use_nodes = True
+    prefix = ('compositing_node_group',)
 ```
 
-...after which a node's inputs resolve exactly like a material's:
+...after which a node's inputs resolve exactly like a material's. On 5.4
+the effect-name segment (`'FX'`) resolves through the effects
+collection's `.get(name)`, the path-walker's existing fallback; no
+special handling was needed:
 
 ```python
-adapter.set_attr(scene, ('compositing_node_group', 'nodes', 'Glare', 'inputs', 'Threshold', 'default_value'), 0.5)
+adapter.set_attr(scene, prefix + ('nodes', 'Glare', 'inputs', 'Threshold', 'default_value'), 0.5)
+adapter.set_attr(scene, ('compositor_effects', 'FX', 'enable_for_render'), False)  # 5.4 only
 ```
+
+Use the tuple form here, as everywhere: an effect or node name
+containing a `.` would mis-split in the dotted-string form.
 
 Some node parameters are plain `bpy_struct` properties instead of
 sockets (varies per node, same as everywhere else in this project) --
@@ -499,22 +623,54 @@ is the point-based sibling of `spawn()` -- gives the object a mesh sized
 to `vertices` up front, instead of the default Blender primitive shape.
 
 ### `scale.py`
-- `scale_linear(domain, range_)` -- `.invert(y)` also available
-- `scale_band(domain_items, range_, padding=0.1)` -- `.bandwidth()`, `.step`
-- `scale_ordinal(domain_items, range_)` -- cycles if there are more items than range values
+
+Every scale works both ways -- the original call form and d3's chaining
+(setters return the scale; with no argument they're getters):
+
+```python
+x = scale_linear((0, 24), (0.2, 4.0))
+x = scale_linear().domain((0, 24)).range((0.2, 4.0))     # same scale
+y = scale_linear().domain((0.3, 97)).nice().range((0, 4)) # domain becomes (0, 100)
+y.ticks(5)       # [0, 20, 40, 60, 80, 100] -- d3's round 1/2/5 x 10^k steps
+y.invert(2.0)    # 50.0
+y.clamp()        # out-of-domain input pins to the range ends; .clamp(False) undoes
+y.copy()         # an independent copy
+```
+
+- `scale_linear(domain, range_)` -- `.domain()`, `.range()`, `.nice(count=10)`,
+  `.ticks(count=10)`, `.clamp()`, `.invert(y)`, `.copy()`. The range can
+  be numbers or equal-length tuples (positions, RGBA colors), interpolated
+  per component.
+- `scale_band(domain_items, range_, padding=0.1)` -- `.domain()`,
+  `.range()`, `.padding()`, `.bandwidth()`; `.step` stays a plain number
+  (not d3's `step()` method), because existing code reads it that way.
+  `padding` is one fraction split evenly around each band (no separate
+  inner/outer padding or align). An unknown item raises `KeyError`.
+- `scale_ordinal(domain_items, range_)` -- cycles if there are more
+  items than range values. `.domain()`, `.range()`, `.unknown(value)`.
+  With an explicit domain, unknown items map to `range_[0]` (the original
+  behaviour) unless `.unknown()` is set. With **no** domain
+  (`scale_ordinal().range(palette)`), the domain is implicit as in d3:
+  each new item is added on first use, so colors are handed out in order
+  of appearance.
 - `scale_time(domain, range_)` -- `scale_linear` with a `datetime.datetime`/
-  `datetime.date` domain instead of plain numbers; `.invert(y)` returns a
-  `datetime`, a real inverse of what `scale()` accepts. Naive datetimes
-  are treated as local time (Python's own `datetime.timestamp()`
-  behavior) -- fine for "which day is this," not guaranteed correct
-  across mixed timezones.
+  `datetime.date` domain instead of plain numbers; chains like
+  `scale_linear`, and `.invert(y)` returns a `datetime`, a real inverse of
+  what `scale()` accepts. No `.ticks()`/`.nice()` (d3's calendar-aware
+  time ticks are a different algorithm). Naive datetimes are treated as
+  local time (Python's own `datetime.timestamp()` behavior) -- fine for
+  "which day is this," not guaranteed correct across mixed timezones.
 - `scale_sequential(domain, interpolator)` -- maps a continuous domain
   through `interpolator(t)` for `t` in `[0, 1]`, instead of onto a fixed
-  range; `interpolator` is any `t -> value` callable. Clamps `t` to
-  `[0, 1]` before calling `interpolator` -- unlike real d3, which only
-  clamps if you opt in with `.clamp(true)` -- since an interpolator
-  built for exactly `[0, 1]` will typically misbehave (values outside
-  0-1) for out-of-domain input otherwise.
+  range; `interpolator` is any `t -> value` callable. Also
+  `scale_sequential(interpolator)` (domain `[0, 1]`) and
+  `scale_sequential().domain(...).interpolator(...)`. Clamps `t` to
+  `[0, 1]` by default -- unlike real d3, which only clamps if you opt in
+  with `.clamp(true)` -- since an interpolator built for exactly
+  `[0, 1]` will typically misbehave (values outside 0-1) for
+  out-of-domain input otherwise. `.clamp(False)` opts out. `.nice()` and
+  `.ticks()` work as for `scale_linear`.
+- `ticks(start, stop, count=10)` -- d3.ticks as a plain function.
 - `interpolate_rgb(start, end)` -- linear interpolation between two
   color tuples (3-channel RGB or 4-channel RGBA), for use as
   `scale_sequential()`'s interpolator -- the common "continuous color
@@ -523,6 +679,30 @@ to `vertices` up front, instead of the default Blender primitive shape.
   color = scale_sequential((0, max_revenue), interpolator=interpolate_rgb((0.9, 0.9, 0.9, 1), (0.9, 0.1, 0.1, 1)))
   bars.attr('fill', lambda el, d, i: color(d['revenue']))
   ```
+
+### Loading data: `csv()`, `tsv()`, `json()` (mirrors d3-fetch + d3.autoType)
+
+```python
+import d3blender as d3
+rows = d3.csv('sales.csv')     # list of dicts; rows.columns is the header order
+```
+
+Values are auto-typed by default, like `d3.csv(url, d3.autoType)`:
+empty -> `None`, `true`/`false` -> `bool`, whole numbers -> `int`, other
+numbers -> `float`, `NaN` -> `float('nan')`, `YYYY-MM-DD` ->
+`datetime.date`, ISO date-times -> `datetime.datetime` (timezone-aware if
+the string has an offset or `Z`); everything else stays a string. Pass
+`typed=False` for raw strings, or `row=fn` (d3's row function:
+`fn(d)`, `fn(d, i)` or `fn(d, i, columns)`; return `None` to drop the
+row). Leading zeros are dropped by typing (`'007'` -> 7), as in d3, so
+read identifier columns with `typed=False` or a row function. A UTF-8
+byte-order mark is stripped. `tsv()` is the tab-separated variant,
+`dsv(path, delimiter)` the general one, and `json(path)` just parses a
+file. Local paths only and synchronous; a Blender-relative path
+(`//data.csv`) needs `bpy.path.abspath()` first. Stdlib only. These
+aren't in `__all__`, so a star-import doesn't shadow the stdlib `csv`/
+`json` modules; use them as `d3.csv(...)`. `auto_type(row)` and
+`auto_type_value(s)` are exposed too.
 
 ### `shape.py` (mirrors pieces of d3-shape)
 - `line(points, closed=False) -> [(p0, p1), ...]` -- one segment per
@@ -575,6 +755,31 @@ segment per tick value.
     (which additionally links the collection into the scene -- an
     unlinked `bpy.data.collections.new()` result is an invisible orphan
     datablock).
+    - `parent=None` looks `name` up across **every** collection (the
+      original behaviour, kept for backward compatibility) and creates a
+      top-level one if nothing matches.
+    - With `parent`, the lookup is scoped to **`parent`'s own direct
+      children**, so two roots can each get their own `"Halos"`:
+
+      ```python
+      root = adapter.get_or_create_collection('Run2', parent=bpy.context.scene.collection)
+      halos = adapter.get_or_create_collection('Halos', parent=root)
+      ```
+
+      Real Blender collection names are global, so if `"Halos"` already
+      exists elsewhere the new child comes back as `"Halos.001"` --
+      expected. Every collection this method creates is stamped with a
+      `d3_name` custom property holding the requested name (the same idea
+      as `Join`'s `d3_key`), and the parent-scoped lookup matches on that
+      stamp as well as the exact name, so a rerun finds `"Halos.001"`
+      again instead of creating `"Halos.002"`. The stamp is also a normal
+      selector attribute: `collection[d3_name=Halos]`. A child created
+      *without* the stamp (by hand, or before this existed) is only found
+      by its exact name.
+    - `parent` doesn't have to be a collection the adapter tracks --
+      `bpy.context.scene.collection` (the scene root, which isn't in
+      `bpy.data.collections`) works, and the result stays visible to
+      `select()` exactly like a `parent=None` collection would.
   - `.create_line_mesh(collection, name, segments)` -- one mesh object
     containing one edge per `(p0, p1)` segment (e.g. axis ticks), rather
     than one object per segment. See `d3blender.axis` above.
@@ -606,19 +811,41 @@ directory onto Blender's Python path (drop it into
 add to `sys.path` in your addon).
 
 ```python
-import bpy
-from d3blender import select
-from d3blender.blender_adapter import get_adapter
+import d3blender as d3
+d3.select('mesh:selected').attr('hp', 100)    # a fresh adapter per call
 
+# or, explicitly:
+from d3blender.blender_adapter import get_adapter
 adapter = get_adapter()   # cheap; call fresh whenever the scene may have changed
-select(adapter, 'mesh:selected').attr('hp', 100)
+d3.select(adapter, 'mesh:selected').attr('hp', 100)
 ```
 
-This is tested against real `bpy` (PyPI's headless module, see
-`tests/blender/`), but not yet against the full Blender application --
-if something doesn't match your Blender version, that's useful
-information. Please open an issue with the version number and what
-broke.
+This is tested against real `bpy` (PyPI's headless 5.2 module, see
+`tests/blender/`) and, headless, inside the Blender 5.4 application. If
+something doesn't match your Blender version, that's useful information.
+Please open an issue with the version number and what broke.
+
+### Script Runner examples
+
+`examples/script_runner/` is a folder of ready-to-run scripts for the
+Script Runner extension (`PARAMS` dict + `execute(context, params)`).
+Add the folder under **Preferences > Add-ons > Script Runner** as a
+*Scripts* folder; d3blender must be importable in Blender. Neither
+project imports the other.
+
+| script | what it builds | rerun behaviour |
+|---|---|---|
+| `bar_chart_csv.py` | one cube per row, band x scale, nice()d linear height, color by value; optional staggered grow-in animation | joined by the category column: bars update in place, new rows add bars, missing rows remove them |
+| `scatter_csv.py` | one ico-sphere per row, x/y/z scaled into a cube, size and categorical color columns | joined by an id column (or row number): spheres move/resize/recolor in place |
+| `csv_to_points.py` | one mesh, one vertex per row; every other numeric column becomes a point attribute; optional Geometry Nodes "Mesh to Points" display whose Radius is set through the path-walker | same object found again; values rewritten in bulk; mesh rebuilt only if the row count changed; attributes for dropped columns removed |
+
+Each takes a CSV file (empty = the bundled sample: `sales.csv`,
+`stars.csv`, `spiral_points.csv`) and a target collection (empty = one
+named after the chart, created under the scene). Colors use each
+object's Color property, read by a shared "d3 Object Color" material
+(Object Info node), so they render too. They're tested by
+`tests/blender/test_script_runner_examples.py`, which calls `execute()`
+with a params dict exactly as Script Runner does, including reruns.
 
 ### Working with other Blender-scripting libraries
 
@@ -654,6 +881,13 @@ a deliberate simplicity trade-off: Blender scenes are rarely more than a
 few thousand objects, so rebuilding is cheap, and a cache that can go
 stale is a worse bug than a cache that doesn't exist.
 
+The adapter-less forms (`select('...')`, `select_all(coll)`,
+`collection(name)`) follow the same rule: each call takes a new
+snapshot, and the returned selection keeps the adapter it was built
+with for everything chained off it. So a long chain sees the scene as of
+its first call (plus the objects it creates itself); start a new
+`select()` after changing the scene some other way.
+
 (`get_or_create_collection()` is the one exception -- it updates the
 adapter's own `.collections` list and parent index directly, so it stays
 correct without another `get_adapter()` call. That only covers changes
@@ -685,9 +919,12 @@ via raw `bpy.ops`/`bpy.data` calls still need a fresh `get_adapter()`.)
   spaced nested name (a modifier/node-group name with a `.001` suffix, a
   multi-word Geometry Nodes input) -- it's a single unescaped string.
   Use `.filter(lambda el: adapter.get_attr(el, (...)) > x)` for those.
-- `blender_adapter.py` is now tested against real `bpy` (PyPI's headless
-  module, see `tests/blender/`), but not yet against the full Blender
-  application or the `databpy`/`nodebpy`-dependent examples.
+- `blender_adapter.py` is tested against real `bpy` (PyPI's headless
+  5.2 module, see `tests/blender/`), and the same suite has been run
+  inside the full Blender 5.4.0 Alpha application
+  (`tests/blender/run_in_blender_app.py`) -- headless/`--background`
+  only, not an interactive session. The `databpy`/`nodebpy`-dependent
+  examples still aren't covered.
 - An object linked *only* into the scene's root collection
   (`bpy.context.scene.collection`, not a collection you created) is
   invisible to `select()` -- that root collection isn't itself a member
@@ -717,7 +954,8 @@ src/d3blender/
     blender_adapter.py    the only file that imports bpy
     scene_doc.py          builds the two synthetic BeautifulSoup docs
     query.py              selector compiler + soupsieve delegation
-    selection.py           Selection / Join
+    selection.py           Selection / Join / Transition
+    fetch.py               csv / tsv / json / auto_type (mirrors d3-fetch + d3-dsv)
     scale.py                scale_linear / scale_band / scale_ordinal / scale_time / scale_sequential
     shape.py                 line() -- connect points into a path (mirrors d3-shape)
     array.py                  bin / extent / max / min (mirrors d3-array)
@@ -725,6 +963,7 @@ src/d3blender/
     points.py                   point_data() -- data bound to mesh vertices
     mock.py                    fake bpy-shaped scene for testing
 examples/                runnable, mirror the README snippets
+examples/script_runner/   Script Runner scripts + sample CSVs (see "Script Runner examples")
 tests/                    pytest suite (uses mock.py, no Blender required)
 tests/blender/             real-bpy suite (needs the blender-test extra; see its README.md)
 ```

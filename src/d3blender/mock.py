@@ -237,7 +237,18 @@ class MockObject:
 
     def keyframe_insert(self, data_path, frame):
         """Mirrors bpy's obj.keyframe_insert(data_path=..., frame=...);
-        records (frame, path, value) since there's no real timeline here."""
+        records (frame, path, value) since there's no real timeline here.
+        Strict like real bpy: a bare custom-property name raises
+        TypeError ("property not found"); custom props must be addressed
+        as an ID-property path, '["hp"]'."""
+        if data_path.startswith('["') and data_path.endswith('"]'):
+            key = data_path[2:-2].replace('\\"', '"').replace('\\\\', '\\')
+            if key not in self._props:
+                raise TypeError(f'keyframe_insert() property {data_path!r} not found')
+            self._keyframes.append((frame, data_path, self._props[key]))
+            return
+        if data_path not in _OBJECT_REAL_ATTRS:
+            raise TypeError(f'bpy_struct.keyframe_insert() property "{data_path}" not found')
         self._keyframes.append((frame, data_path, getattr(self, data_path)))
 
     def get(self, key, default=None):

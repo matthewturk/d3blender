@@ -114,3 +114,41 @@ def test_selection_attr_setter_reaches_a_real_gn_input(spawn):
     select(adapter, '.chart').attr(('modifiers', 'Scatter', 'Size'), 4.0)
 
     assert adapter.get_attr(obj, ('modifiers', 'Scatter', 'Size')) == 4.0
+
+
+def _socket_identifier(mod, name):
+    return next(item.identifier for item in mod.node_group.interface.items_tree
+                if item.name == name)
+
+
+@pytest.mark.parametrize('socket_type, make_value, as_comparable', [
+    ('NodeSocketFloat', lambda: 1.25, lambda v: v),
+    ('NodeSocketInt', lambda: 7, lambda v: v),
+    ('NodeSocketBool', lambda: True, lambda v: bool(v)),
+    ('NodeSocketVector', lambda: (1.0, 2.0, 3.0), lambda v: tuple(v)),
+    ('NodeSocketObject', lambda: bpy.data.objects.new('Target', None), lambda v: v),
+    ('NodeSocketMaterial', lambda: bpy.data.materials.new('Mat'), lambda v: v),
+], ids=['float', 'int', 'bool', 'vector', 'object', 'material'])
+def test_geometry_nodes_input_round_trips_per_socket_type(spawn, socket_type, make_value,
+                                                          as_comparable):
+    """Pins the `properties.inputs[identifier]["value"]` storage shape per
+    socket type, not just for floats -- ID-typed sockets (object,
+    material) are the ones most likely to diverge. Run against the PyPI
+    bpy 5.2 wheel by the normal suite, and against the real Blender 5.4
+    application via run_in_blender_app.py (see this directory's README)."""
+    obj = spawn('Emitter', bpy.context.scene.collection)
+    group = bpy.data.node_groups.new('Group', 'GeometryNodeTree')
+    group.interface.new_socket(name='Param', in_out='INPUT', socket_type=socket_type)
+    group.interface.new_socket(name='Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    mod = obj.modifiers.new(name='GN', type='NODES')
+    mod.node_group = group
+    adapter = get_adapter()
+    value = make_value()
+
+    adapter.set_attr(obj, ('modifiers', 'GN', 'Param'), value)
+
+    holder = mod.properties.inputs[_socket_identifier(mod, 'Param')]
+    assert set(holder.keys()) >= {'value'}
+    assert as_comparable(holder['value']) == value
+    assert as_comparable(adapter.get_attr(obj, ('modifiers', 'GN', 'Param'))) == value
+    assert as_comparable(adapter.gn_inputs(mod)['Param']) == value

@@ -5,6 +5,8 @@ whichever shape they want. See selection.py's module docstring and
 _arity()'s docstring for why this exists (closing the gap with real
 d3's own (d, i) => ... accessors)."""
 
+import pytest
+
 from d3blender import select
 from d3blender.mock import new_scene, spawn
 from d3blender.selection import Selection
@@ -141,3 +143,75 @@ def test_remove_still_returns_an_empty_selection():
     empty = balls.remove()
     assert empty.elements == []
     assert empty.datum == []
+
+
+def test_keyframe_frame_can_be_a_per_element_accessor_from_the_bound_datum():
+    adapter, chart = new_scene('Chart')
+    data = [{'label': 'a', 'frame': 10, 'x': 1.0}, {'label': 'b', 'frame': 42, 'x': 2.0}]
+    balls = (select(adapter, '#Chart mesh')
+             .data(data, key=lambda i, d: d['label'])
+             .join(enter=lambda d: spawn(adapter, chart, f"ball_{d['label']}")))
+
+    balls.keyframe(lambda el, d, i: d['frame'], location=lambda el, d, i: (d['x'], 0, 0))
+
+    assert balls.elements[0]._keyframes == [(10, 'location', (1.0, 0, 0))]
+    assert balls.elements[1]._keyframes == [(42, 'location', (2.0, 0, 0))]
+
+
+def test_keyframe_frame_accessor_supports_the_one_and_two_arg_shapes():
+    adapter, balls, data = _balls()
+
+    balls.keyframe(lambda el, i: 5 + i, location=(0, 0, 0))
+    balls.keyframe(lambda el: 100 if el.name == 'ball_a' else 200, location=(1, 0, 0))
+
+    assert [k[0] for k in balls.elements[0]._keyframes] == [5, 100]
+    assert [k[0] for k in balls.elements[1]._keyframes] == [6, 200]
+
+
+def test_keyframe_frame_accessor_is_evaluated_once_per_element_not_per_attr():
+    adapter, balls, data = _balls()
+    calls = []
+
+    def frame_of(el, i):
+        calls.append(el.name)
+        return 3
+
+    balls.keyframe(frame_of, location=(0, 0, 0), scale=(1, 1, 1))
+
+    assert calls == ['ball_a', 'ball_b']
+    assert balls.elements[0]._keyframes == [(3, 'location', (0, 0, 0)), (3, 'scale', (1, 1, 1))]
+
+
+def test_keyframe_on_a_custom_property_uses_the_id_property_path():
+    # Real bpy's keyframe_insert('hp') raises "property not found" for a
+    # custom prop; the adapter retries as '["hp"]'. The mock is just as
+    # strict, so this exercises the same fallback.
+    adapter, balls, data = _balls()
+
+    balls.keyframe(lambda el, d, i: 10 + i, amplitude=lambda el, d, i: d['amplitude'] * 2)
+
+    assert balls.elements[0]._keyframes == [(10, '["amplitude"]', 0.2)]
+    assert balls.elements[1]._keyframes == [(11, '["amplitude"]', 0.4)]
+
+
+def test_keyframe_on_an_unknown_name_still_raises():
+    # The retry only applies to a key el actually has as a custom prop;
+    # anything else keeps bpy's own TypeError.
+    adapter, balls, data = _balls()
+    el = balls.elements[0]
+    with pytest.raises(TypeError):
+        adapter.keyframe_insert(el, 'nope', 1)
+
+
+def test_varargs_accessor_receives_el_d_i():
+    adapter, balls, data = _balls()
+    seen = []
+    balls.each(lambda *args: seen.append(args))
+    assert [(el.name, d['label'], i) for el, d, i in seen] == [('ball_a', 'a', 0), ('ball_b', 'b', 1)]
+
+
+def test_varargs_after_a_named_first_param_also_receives_d_and_i():
+    adapter, balls, data = _balls()
+    balls.attr('amplitude', lambda el, *rest: rest[0]['amplitude'] + rest[1])
+    assert adapter.get_attr(balls.elements[0], 'amplitude') == 0.1
+    assert adapter.get_attr(balls.elements[1], 'amplitude') == 1.2

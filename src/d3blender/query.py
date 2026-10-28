@@ -146,13 +146,76 @@ def _predicates_ok(adapter, el, predicates):
     return True
 
 
-def select(adapter, target):
-    """`target` is either a selector string, or -- mirroring d3's
+_NO_TARGET = object()
+_default = None
+
+
+def set_default_adapter(adapter):
+    """Make `adapter` what `select()`/`select_all()`/`collection()` use
+    when none is passed. Accepts an adapter, a zero-argument factory
+    returning one, or `None` to restore the normal behaviour (a fresh
+    live adapter per call, inside Blender). Returns the previous setting,
+    so tests can restore it. Mostly for the mock and for tests: inside
+    Blender the default is already right."""
+    global _default
+    previous, _default = _default, adapter
+    return previous
+
+
+def default_adapter():
+    """The adapter used when a call doesn't pass one: whatever
+    set_default_adapter() installed, otherwise a **fresh**
+    `blender_adapter.get_adapter()` snapshot. Fresh on every call, on
+    purpose: an adapter is a snapshot of bpy.data (see README "Live vs.
+    cached"), so caching one here would bring back the stale-index bugs
+    get_adapter()'s docstring warns about."""
+    if _default is not None:
+        return _default() if callable(_default) else _default
+    try:
+        from .blender_adapter import get_adapter
+        return get_adapter()
+    except ModuleNotFoundError as exc:
+        if exc.name != 'bpy':
+            raise
+        raise RuntimeError(
+            "no adapter given and bpy isn't importable (not running inside "
+            "Blender) -- pass one explicitly, e.g. select(adapter, target), or "
+            "call d3blender.set_default_adapter(adapter) first"
+        ) from None
+
+
+def _is_collection(x):
+    return hasattr(x, 'objects') and hasattr(x, 'children')
+
+
+def select(*args, adapter=None, target=_NO_TARGET):
+    """`select(target)` or `select(adapter, target)` -- both work.
+
+    `target` is either a selector string, or -- mirroring d3's
     `d3.select(node)` -- an element (or iterable of elements) to wrap
     directly, bypassing CSS entirely. Use the latter to re-wrap an element
     you already have (e.g. to `.keyframe()` it) instead of round-tripping
     it through `#name`: Blender's own auto-suffixed names ("Cube.001")
-    aren't valid CSS id-selector text, since CSS reads the dot as a class."""
+    aren't valid CSS id-selector text, since CSS reads the dot as a class.
+
+    With no adapter (one positional argument, or `adapter=None`), a fresh
+    one comes from default_adapter() -- inside Blender, a new
+    `get_adapter()` snapshot per call. The selection keeps that adapter
+    for everything chained off it."""
+    if len(args) > 2:
+        raise TypeError(f'select() takes at most 2 positional arguments ({len(args)} given)')
+    if len(args) == 2:
+        adapter, target = args
+    elif len(args) == 1:
+        if target is _NO_TARGET:
+            target = args[0]
+        else:
+            adapter = args[0]
+    if target is _NO_TARGET:
+        raise TypeError("select() missing the 'target' argument")
+    if adapter is None:
+        adapter = default_adapter()
+
     if not isinstance(target, str):
         elements = list(target) if hasattr(target, '__iter__') else [target]
         return Selection(adapter, elements)
@@ -168,3 +231,41 @@ def select(adapter, target):
             seen.add(id(el))
             elements.append(el)
     return Selection(adapter, elements)
+
+
+def select_all(target, selector=None, adapter=None):
+    """d3's `parent.selectAll(...)`: the usual way to start a join.
+
+    - `target` a **collection**: its own objects (direct members, not
+      nested collections'), with the collection remembered as the
+      selection's `parent` -- so `.data(...).join('cube')` creates new
+      elements in it and a rerun finds and updates them in place:
+
+          bars = select_all(chart).data(rows, key='label').join('cube')
+
+    - `target` a selector string or element(s): same as `select()`, no
+      parent.
+
+    `selector` optionally narrows the result (a selector string or a
+    predicate, as in `.filter()`), e.g. `select_all(chart, '.bar')` when
+    one collection holds several independently joined groups -- without
+    it, a join would treat the other group's keyed objects as its own
+    exits. Tag a group with `.classed('bar', True)` after its join.
+
+    `adapter` defaults as in select()."""
+    if adapter is None:
+        adapter = default_adapter()
+    if _is_collection(target):
+        sel = Selection(adapter, adapter.collection_objects(target), parent=target)
+    else:
+        sel = select(adapter, target)
+    return sel.filter(selector) if selector is not None else sel
+
+
+def collection(name, parent=None, adapter=None):
+    """Get-or-create a collection -- `adapter.get_or_create_collection()`
+    without having to hold an adapter. See that method for how `parent`
+    scopes the lookup."""
+    if adapter is None:
+        adapter = default_adapter()
+    return adapter.get_or_create_collection(name, parent=parent)
