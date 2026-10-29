@@ -1,5 +1,8 @@
 # d3blender
 
+**EXPERIMENTAL!!!!!**  This was largely vibe-coded, and probably doesn't work
+that amazingly well, but it meets some specific needs I had.
+
 A d3.js-flavored selector, join/reconciliation, and animation layer over
 Blender's scene graph. Written in Python, for Python.
 

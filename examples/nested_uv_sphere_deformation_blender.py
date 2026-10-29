@@ -10,6 +10,11 @@ though, which is the thing worth showing here -- they drive a real UV
 sphere's vertices exactly the same way they drove the previous demo's
 bare point cloud.
 
+The spheres come from join('uv_sphere', segments=16, ring_count=8),
+which calls that operator and links each sphere into the selection's
+collection. Shape parameters only apply at creation time (they're baked
+into the mesh), so changing them later means deleting the spheres first.
+
 Real-bpy only -- bpy.ops.mesh.primitive_uv_sphere_add() is an operator;
 mock.py has no bpy.ops at all, by design (see CLAUDE.md), so unlike
 nested_point_deformation.py this one has no mock-based sibling to run
@@ -55,28 +60,13 @@ import math
 
 import bpy
 
-from d3blender import select, scale_band
+import d3blender as d3
+from d3blender import scale_band
 from d3blender.blender_adapter import get_adapter, live_point_data
 
 FPS = 24
 FRAMES = range(1, 25)
 
-
-def spawn_uv_sphere(collection, name, radius=1.0, segments=16, ring_count=8):
-    """The Blender-specific, real-topology stand-in for
-    nested_point_deformation.py's make_sphere_shape() + spawn_points() --
-    a real UV sphere (proper poles, quad rings, actual faces), relinked
-    into `collection` the same way scatter_plot_3d_blender.py's
-    spawn_sphere() does it. This is the "nice looking objects" answer:
-    d3blender doesn't build this geometry, Blender's own operator does,
-    and point_attr/point_data don't need to know the difference."""
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, segments=segments, ring_count=ring_count)
-    obj = bpy.context.active_object
-    obj.name = name
-    for coll in list(obj.users_collection):
-        coll.objects.unlink(obj)
-    collection.objects.link(obj)
-    return obj
 
 
 # --- level 1: per-instance data, one entry per sphere -------------------
@@ -88,11 +78,12 @@ spheres_data = [
 x = scale_band([d['label'] for d in spheres_data], range_=(0, 4), padding=0.3)
 
 adapter = get_adapter()
-chart = adapter.get_or_create_collection('Chart')
+chart = d3.collection('Spheres', adapter=adapter)
 
-balls = (select(adapter, '#Chart mesh')
-         .data(spheres_data, key=lambda i, d: d['label'])
-         .join(enter=lambda d: spawn_uv_sphere(chart, f"ball_{d['label']}")))
+balls = (d3.select_all(chart, adapter=adapter)
+         .data(spheres_data, key='label')
+         .join('uv_sphere', radius=1.0, segments=16, ring_count=8)
+         .attr('name', lambda el, d, i: f"ball_{d['label']}"))
 
 for el, d in zip(balls.elements, spheres_data):
     el.location = (x(d['label']), 0, 1.5)  # object-level WORLD position, from data

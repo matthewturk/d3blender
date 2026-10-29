@@ -1,13 +1,15 @@
 """
 scatter_plot_3d.py, but wired to a real Blender scene instead of the mock.
 This is the pattern for turning any of the mock-based examples into
-something you actually run inside Blender: swap the adapter
-(d3blender.mock -> d3blender.blender_adapter.get_adapter()) and swap
-object creation (mock.spawn() -> real bpy.ops/bpy.data calls), since
-object creation is Blender-specific and the library deliberately doesn't
-wrap it (see CLAUDE.md). Getting the chart-root collection itself *is*
-generalized, though -- get_or_create_collection() works the same way on
-both adapters.
+something you actually run inside Blender: drop the adapter (inside
+Blender, select_all() gets a live one itself) and swap mock.spawn() for
+a shape name -- join('uv_sphere', radius=0.3) calls Blender's
+primitive_uv_sphere_add and links each new sphere into the selection's
+collection. The mock has no bpy.ops, so it keeps its explicit spawn().
+
+With a shape name there's no enter/update callback to put per-element
+setup in; the join result's .entered and .updated sub-selections do
+that job instead (new points get placed, existing ones animate).
 
 d3blender must already be importable from Blender's own Python -- see the
 README's "Using it inside Blender" section.
@@ -23,13 +25,10 @@ maintainers -- if something here doesn't match your Blender version,
 that's expected; see CLAUDE.md's "Testing status" section.
 """
 
-import bpy
+import d3blender as d3
+from d3blender import scale_linear, scale_ordinal
 
-from d3blender import select, scale_linear, scale_ordinal
-from d3blender.blender_adapter import get_adapter
-
-adapter = get_adapter()
-chart = adapter.get_or_create_collection('Chart')  # d3.create('svg'), Blender-flavored
+chart = d3.collection('Scatter')  # d3.create('svg'), Blender-flavored
 
 sx = scale_linear(domain=(0, 5), range_=(-5, 5))
 sy = scale_linear(domain=(0, 5), range_=(-5, 5))
@@ -38,36 +37,22 @@ color = scale_ordinal(['a', 'b'], range_=['#E8B75D', '#5B8DEF'])
 FPS = 24
 
 
-def spawn_sphere(name):
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.3)
-    obj = bpy.context.active_object
-    obj.name = name
-    for coll in list(obj.users_collection):
-        coll.objects.unlink(obj)
-    chart.objects.link(obj)
-    return obj
+
+def pos(el, d, i):
+    return (sx(d['x']), sy(d['y']), sz(d['z']))
 
 
-def points():
-    return select(adapter, '#Chart mesh').filter(lambda el: el.name.startswith('pt_'))
+def join_points(data):
+    # The default exit removes points whose id is no longer in the data.
+    return (d3.select_all(chart)
+            .data(data, key='id')
+            .join('uv_sphere', radius=0.3)
+            .attr('fill', lambda el, d, i: color(d['group'])))
 
 
-def enter_point(d):
-    el = spawn_sphere(f"pt_{d['id']}")
-    el.location = (sx(d['x']), sy(d['y']), sz(d['z']))
-    el['fill'] = color(d['group'])
-    return el
-
-
-def update_point(el, d):
-    sel = select(adapter, el)  # re-wrap the known element -- no CSS round trip
-    sel.keyframe(1, location=el.location)                                    # hold current pose
-    sel.keyframe(FPS, location=(sx(d['x']), sy(d['y']), sz(d['z'])))          # animate to new position
-    el['fill'] = color(d['group'])
-
-
-def exit_point(el):
-    adapter.remove(el)
+def place_new(points):
+    points.entered.attr('name', lambda el, d, i: f"pt_{d['id']}").attr('location', pos)
+    return points
 
 
 points_v1 = [
@@ -75,7 +60,7 @@ points_v1 = [
     {'id': 1, 'x': 4.5, 'y': 1.1, 'z': 2.2, 'group': 'b'},
     {'id': 2, 'x': 2.8, 'y': 4.9, 'z': 1.7, 'group': 'a'},
 ]
-points().data(points_v1, key=lambda i, d: d['id']).join(enter=enter_point)
+place_new(join_points(points_v1))
 
 # The change: point 0 stays put, point 1 moves, point 2 exits, point 3 enters.
 points_v2 = [
@@ -83,8 +68,10 @@ points_v2 = [
     {'id': 1, 'x': 0.6, 'y': 4.8, 'z': 3.9, 'group': 'b'},
     {'id': 3, 'x': 3.3, 'y': 2.2, 'z': 4.4, 'group': 'b'},
 ]
-result = points().data(points_v2, key=lambda i, d: d['id']).join(
-    enter=enter_point, update=update_point, exit=exit_point)
+result = place_new(join_points(points_v2))
+(result.updated
+ .keyframe(1, location=lambda el: tuple(el.location))  # hold current pose
+ .keyframe(FPS, location=pos))                         # animate to new position
 
 print('points remaining:', sorted(el.name for el in result))
 result.each(lambda el, i: print(

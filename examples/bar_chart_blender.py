@@ -2,12 +2,12 @@
 bar_chart.py, but wired to a real Blender scene instead of the mock.
 Same conversion recipe as scatter_plot_3d.py -> scatter_plot_3d_blender.py
 (see that pair too, for the enter/update/exit case this one doesn't
-need): swap the adapter (d3blender.mock -> get_adapter()) and swap
-object creation (mock.spawn() -> real bpy.ops/bpy.data calls), since
-object creation is Blender-specific and the library deliberately doesn't
-wrap it (see CLAUDE.md). Everything else -- scales, the selector, the
-join itself -- is unchanged: adapter-agnostic code never needs to know
-which adapter it's running against.
+need): drop the adapter (inside Blender, select_all() gets a live one
+itself) and swap mock.spawn() for join('cube') -- d3's own
+`selection.join("rect")` shorthand, which calls Blender's
+primitive_cube_add and links each new cube into the selection's
+collection. The mock has no bpy.ops, so it keeps its explicit spawn().
+Everything else -- scales, keys, the .attr() chain -- is unchanged.
 
 d3blender must already be importable from Blender's own Python -- see the
 README's "Using it inside Blender" section.
@@ -28,13 +28,10 @@ matching real d3's own `.attr("x", d => ...)` idiom (see
 Selection.datum in selection.py).
 """
 
-import bpy
+import d3blender as d3
+from d3blender import scale_linear, scale_band, scale_ordinal
 
-from d3blender import select, scale_linear, scale_band, scale_ordinal
-from d3blender.blender_adapter import get_adapter
-
-adapter = get_adapter()
-chart = adapter.get_or_create_collection('Chart')  # unchanged from the mock version
+chart = d3.collection('Bar Chart')
 
 data = [
     {'label': 'Jan', 'revenue': 12},
@@ -49,24 +46,12 @@ color = scale_ordinal([d['label'] for d in data],
                        range_=['#E8B75D', '#5B8DEF', '#5DE8A6', '#E85D9E'])
 
 
-def spawn_cube(name):
-    # The Blender-specific stand-in for mock.spawn() -- real object
-    # creation, which d3blender deliberately doesn't wrap (see CLAUDE.md
-    # -- databpy's db.create_object('CUBE', name=name) is another option
-    # here if you're already depending on databpy).
-    bpy.ops.mesh.primitive_cube_add()
-    obj = bpy.context.active_object
-    obj.name = name
-    for coll in list(obj.users_collection):
-        coll.objects.unlink(obj)
-    chart.objects.link(obj)
-    return obj
-
 
 bars = (
-    select(adapter, '#Chart mesh')
-    .data(data, key=lambda i, d: d['label'])
-    .join(enter=lambda d: spawn_cube(f"bar_{d['label']}"))
+    d3.select_all(chart)
+    .data(data, key='label')
+    .join('cube')  # size 2, so scale is half the bar's extent
+    .attr('name', lambda el, d, i: f"bar_{d['label']}")
     .attr('location', lambda el, d, i: (x(d['label']), 0, height(d['revenue']) / 2))
     .attr('scale', lambda el, d, i: (x.bandwidth() / 2, 0.5, height(d['revenue']) / 2))
     .attr('revenue', lambda el, d, i: d['revenue'])
